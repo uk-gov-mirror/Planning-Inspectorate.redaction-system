@@ -25,28 +25,10 @@ resource "azurerm_role_assignment" "function_app_processor_servicebus_datasender
   principal_id         = azurerm_linux_function_app.processor.identity[0].principal_id
 }
 
-resource "azurerm_role_assignment" "function_app_storage_contributor" {
-  scope                = azurerm_storage_account.redaction_storage.id
-  role_definition_name = "Storage Blob Data Contributor"
-  principal_id         = azurerm_linux_function_app.redaction_system.identity[0].principal_id
-}
-
-resource "azurerm_role_assignment" "function_app_openai_contributor" {
-  scope                = azurerm_cognitive_account.open_ai.id
-  role_definition_name = "Cognitive Services OpenAI User"
-  principal_id         = azurerm_linux_function_app.redaction_system.identity[0].principal_id
-}
-
-resource "azurerm_role_assignment" "function_app_computervision_contributor" {
-  scope                = azurerm_cognitive_account.computer_vision.id
-  role_definition_name = "Cognitive Services User"
-  principal_id         = azurerm_linux_function_app.redaction_system.identity[0].principal_id
-}
-
 resource "azurerm_role_assignment" "function_app_servicebus_datasender" {
   scope                = data.azurerm_servicebus_namespace.backoffice.id
   role_definition_name = "Azure Service Bus Data Sender"
-  principal_id         = azurerm_linux_function_app.redaction_system.identity[0].principal_id
+  principal_id         = azurerm_linux_function_app.receiver.identity[0].principal_id
 }
 
 ############################################################################
@@ -105,7 +87,7 @@ resource "azurerm_role_assignment" "ado_deployment_functions_processor_contribut
 }
 
 resource "azurerm_role_assignment" "ado_deployment_functions_contributor" {
-  scope                = azurerm_linux_function_app.redaction_system.id
+  scope                = azurerm_linux_function_app.receiver.id
   role_definition_name = "Contributor"
   principal_id         = data.azuread_service_principal.deployment.object_id
 }

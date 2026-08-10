@@ -142,7 +142,7 @@ resource "azurerm_private_endpoint" "function_app_processor" {
 }
 
 resource "azurerm_private_endpoint" "function_app" {
-  name                = "${local.org}-pe-${azurerm_linux_function_app.redaction_system.name}-${var.environment}"
+  name                = "${local.org}-pe-${azurerm_linux_function_app.receiver.name}-${var.environment}"
   resource_group_name = azurerm_resource_group.primary.name
   location            = local.location
   subnet_id           = azurerm_subnet.redaction_system.id
@@ -155,7 +155,7 @@ resource "azurerm_private_endpoint" "function_app" {
   private_service_connection {
     name                           = "${local.org}-psc-${local.service_name}-functionapp-${var.environment}"
     is_manual_connection           = false
-    private_connection_resource_id = azurerm_linux_function_app.redaction_system.id
+    private_connection_resource_id = azurerm_linux_function_app.receiver.id
     subresource_names              = ["sites"]
   }
 
