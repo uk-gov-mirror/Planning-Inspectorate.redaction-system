@@ -494,6 +494,138 @@ class PDFProcessor(FileProcessor):
         new_file_bytes.seek(0)
         return new_file_bytes
 
+    def _extract_pdf_text_and_images(
+        self, file_bytes: BytesIO
+    ) -> tuple[str, list[PDFImageMetadata]]:
+        # Extract text from PDF
+        with TimerUtil() as timer:
+            self.pdf_text = PDFUtil.extract_pdf_text(file_bytes)
+        self.run_metrics["pdf_text_extraction_time"] = timer.elapsed_time
+        LoggingUtil().log_info(
+            f"The following text was extracted from the PDF:\n'{self.pdf_text}'"
+        )
+
+        if self.pdf_text and not is_english_text(self.pdf_text):
+            exception = NonEnglishContentException(
+                "Language check: non-English or insufficient English content "
+                "detected; skipping provisional redactions."
+            )
+            LoggingUtil().log_exception(exception)
+            raise exception
+
+        with TimerUtil() as timer:
+            self.pdf_images = PDFUtil.extract_pdf_images(file_bytes)
+        self.run_metrics["pdf_image_extraction_time"] = timer.elapsed_time
+        LoggingUtil().log_info(f"Extracted {len(self.pdf_images)} images from the PDF.")
+
+    def _apply_rule(self, rule: Redactor):
+        LoggingUtil().log_info(f"Running redaction rule {rule}")
+        with TimerUtil() as timer:
+            redaction_result = rule.redact()
+        redaction_time = timer.elapsed_time
+        redaction_strings = (
+            redaction_result.redaction_strings
+            if hasattr(redaction_result, "redaction_strings")
+            else []
+        )
+        n_strings = len(redaction_strings)
+
+        if issubclass(redaction_result.__class__, TextRedactionResult):
+            self.run_metrics["text_analysis_total_time"] += redaction_time
+            self._text_redaction_summary[redaction_result.rule_name] = {
+                "redaction_strings": redaction_strings,
+                "n_proposed": n_strings,
+                "n_applied": n_strings,
+            }
+        elif issubclass(redaction_result.__class__, ImageRedactionResult):
+            self.run_metrics["image_analysis_total_time"] += redaction_time
+
+        LoggingUtil().log_info(
+            f"The redactor {rule} yielded the following result: "
+            f"{json.dumps(dataclasses.asdict(redaction_result), indent=4, default=str)}"
+        )
+        self.redaction_results.append(redaction_result)
+
+    def _apply_redaction_rules(
+        self,
+        redaction_config: dict[str, Any],
+    ):
+        # Generate list of redaction rules from config
+
+        # Attach text and images to redaction configs
+        for rule in self.redaction_rules:
+            if hasattr(rule, "text"):
+                rule.text = self.pdf_text
+            if hasattr(rule, "images"):
+                rule.images = PDFUtil.extract_unique_pdf_images(self.pdf_images)
+
+        # Generate list of rules to apply
+        redaction_rules_to_apply: list[Redactor] = [
+            RedactorFactory.get(rule.redactor_type)(rule)
+            for rule in self.redaction_rules
+        ]
+
+        # TODO convert back to a set
+        self.run_metrics["text_analysis_total_time"] = 0.0
+        self.run_metrics["image_analysis_total_time"] = 0.0
+
+        # Apply each redaction rule
+        self._text_redaction_summary: dict[str, Any] = {}
+        for rule_to_apply in redaction_rules_to_apply:
+            self._apply_rule(rule_to_apply)
+
+        self.run_metrics["analysis_total_time"] = (
+            self.run_metrics["text_analysis_total_time"]
+            + self.run_metrics["image_analysis_total_time"]
+        )
+        LoggingUtil().log_info("PDF analysis complete")
+
+    def _validate_redaction_results(
+        self,
+    ) -> tuple[list[str], list[ImageRedactionResult]]:
+        # Separate out text and image redaction results
+        text_redaction_results: list[TextRedactionResult] = [
+            x
+            for x in self.redaction_results
+            if issubclass(x.__class__, TextRedactionResult)
+        ]
+        text_redactions = [
+            " ".join(redaction_string.split("\n"))
+            for result in text_redaction_results
+            for redaction_string in result.redaction_strings
+        ]
+        # Ensure all redaction strings are unique
+        text_redactions = list(set(text_redactions))
+
+        image_redaction_results: list[ImageRedactionResult] = [
+            x
+            for x in self.redaction_results
+            if issubclass(x.__class__, ImageRedactionResult)
+        ]
+
+        # Ensure all image redaction results are unique
+        unique_image_redaction_results: list[ImageRedactionResult] = []
+        for result in image_redaction_results:
+            if result not in unique_image_redaction_results:
+                unique_image_redaction_results.append(result)
+
+        # Ensure all redaction results have a mechanism to be applied
+        unapplied_redaction_results = [
+            x
+            for x in self.redaction_results
+            if x not in text_redaction_results + image_redaction_results
+        ]
+        if unapplied_redaction_results:
+            with UnprocessedRedactionResultException(
+                "The following redaction results were generated by the "
+                "PDFProcessor, but there is no mechanism to process them: "
+                f"{json.dumps(list(unapplied_redaction_results), indent=4)}"
+            ) as e:
+                LoggingUtil().log_exception(e)
+                raise e
+
+        return text_redactions, unique_image_redaction_results
+
     @log_to_appins
     def redact(
         self,
@@ -508,122 +640,22 @@ class PDFProcessor(FileProcessor):
         the redaction rules to apply.
         :return: The redacted PDF file bytes.
         """
-        # Extract text from PDF
-        with TimerUtil() as timer:
-            pdf_text = PDFUtil.extract_pdf_text(file_bytes)
-        self.run_metrics["pdf_text_extraction_time"] = timer.elapsed_time
-        LoggingUtil().log_info(
-            f"The following text was extracted from the PDF:\n'{pdf_text}'"
-        )
-
-        if pdf_text and not is_english_text(pdf_text):
-            exception = NonEnglishContentException(
-                "Language check: non-English or insufficient English content "
-                "detected; skipping provisional redactions."
-            )
-            LoggingUtil().log_exception(exception)
-            raise exception
-
-        with TimerUtil() as timer:
-            pdf_images = PDFUtil.extract_pdf_images(file_bytes)
-        self.run_metrics["pdf_image_extraction_time"] = timer.elapsed_time
-
-        # Generate list of redaction rules from config
-        redaction_rules: list[RedactionConfig] = redaction_config.get(
+        self.redaction_rules: list[RedactionConfig] = redaction_config.get(
             "redaction_rules", []
         )
+        self.redaction_results: list[RedactionResult] = []
 
-        # Attach text and images to redaction configs
-        for rule in redaction_rules:
-            if hasattr(rule, "text"):
-                rule.text = pdf_text
-            if hasattr(rule, "images"):
-                rule.images = PDFUtil.extract_unique_pdf_images(pdf_images)
-
-        # Generate list of rules to apply
-        redaction_rules_to_apply: list[Redactor] = [
-            RedactorFactory.get(rule.redactor_type)(rule) for rule in redaction_rules
-        ]
+        self._extract_pdf_text_and_images(file_bytes)
 
         # Generate redactions
-        # TODO convert back to a set
-        redaction_results: list[RedactionResult] = []
-        self.run_metrics["text_analysis_total_time"] = 0.0
-        self.run_metrics["image_analysis_total_time"] = 0.0
-
-        # Apply each redaction rule
-        text_redaction_summary: dict[str, Any] = {}
-        for rule_to_apply in redaction_rules_to_apply:
-            LoggingUtil().log_info(f"Running redaction rule {rule_to_apply}")
-            with TimerUtil() as timer:
-                redaction_result = rule_to_apply.redact()
-            redaction_time = timer.elapsed_time
-
-            if issubclass(redaction_result.__class__, TextRedactionResult):
-                self.run_metrics["text_analysis_total_time"] += redaction_time
-                text_redaction_summary[redaction_result.rule_name] = {
-                    "redaction_strings": redaction_result.redaction_strings,
-                    "n_proposed": len(redaction_result.redaction_strings),
-                    "n_applied": len(redaction_result.redaction_strings),
-                }
-            elif issubclass(redaction_result.__class__, ImageRedactionResult):
-                self.run_metrics["image_analysis_total_time"] += redaction_time
-
-            LoggingUtil().log_info(
-                f"The redactor {rule_to_apply} yielded the following result: "
-                f"{json.dumps(dataclasses.asdict(redaction_result), indent=4, default=str)}"
-            )
-            redaction_results.append(redaction_result)
-
-        self.run_metrics["analysis_total_time"] = (
-            self.run_metrics["text_analysis_total_time"]
-            + self.run_metrics["image_analysis_total_time"]
-        )
-        LoggingUtil().log_info("PDF analysis complete")
-
-        # Separate out text and image redaction results
-        text_redaction_results: list[TextRedactionResult] = [
-            x for x in redaction_results if issubclass(x.__class__, TextRedactionResult)
-        ]
-        text_redactions = [
-            " ".join(redaction_string.split("\n"))
-            for result in text_redaction_results
-            for redaction_string in result.redaction_strings
-        ]
-        # Ensure all redaction strings are unique
-        text_redactions = list(set(text_redactions))
-
-        image_redaction_results: list[ImageRedactionResult] = [
-            x
-            for x in redaction_results
-            if issubclass(x.__class__, ImageRedactionResult)
-        ]
-        # Ensure all image redaction results are unique
-        unique_image_redaction_results = []
-        for result in image_redaction_results:
-            if result not in unique_image_redaction_results:
-                unique_image_redaction_results.append(result)
-
-        # Ensure all redaction results have a mechanism to be applied
-        unapplied_redaction_results = [
-            x
-            for x in redaction_results
-            if x not in text_redaction_results + image_redaction_results
-        ]
-        if unapplied_redaction_results:
-            with UnprocessedRedactionResultException(
-                "The following redaction results were generated by the "
-                "PDFProcessor, but there is no mechanism to process them: "
-                f"{json.dumps(list(unapplied_redaction_results), indent=4)}"
-            ) as e:
-                LoggingUtil().log_exception(e)
-                raise e
+        self._apply_redaction_rules(redaction_config)
+        text_redactions, image_redactions = self._validate_redaction_results()
 
         self.run_metrics["result_metrics"] = {
-            x.rule_name: x.run_metrics for x in redaction_results
+            x.rule_name: x.run_metrics for x in self.redaction_results
         }
         self.run_metrics["aggregate_result_metrics"] = self.combine_run_metrics(
-            [x.run_metrics for x in redaction_results]
+            [x.run_metrics for x in self.redaction_results]
         )
 
         # Apply text redactions by highlighting text to redact
@@ -639,19 +671,20 @@ class PDFProcessor(FileProcessor):
         LoggingUtil().log_info("Applying image redactions")
         with TimerUtil() as timer:
             new_file_bytes = self._apply_provisional_image_redactions(
-                new_file_bytes, unique_image_redaction_results, pdf_images=pdf_images
+                new_file_bytes, image_redactions, pdf_images=self.pdf_images
             )
         self.run_metrics["image_redaction_apply_time"] = timer.elapsed_time
         LoggingUtil().log_info("Image redactions applied")
 
+        # Update run metrics with unapplied text redaction terms and summary
         self.run_metrics["unapplied_text_redaction_terms"] = [
             term for term, count in self.terms_found.items() if count == 0
         ]
         for term in self.run_metrics["unapplied_text_redaction_terms"]:
-            for result, summary in text_redaction_summary.items():
+            for result, summary in self._text_redaction_summary.items():
                 if term in summary["redaction_strings"]:
-                    text_redaction_summary[result]["n_applied"] -= 1
-        self.run_metrics["text_redaction_summary"] = text_redaction_summary
+                    self._text_redaction_summary[result]["n_applied"] -= 1
+        self.run_metrics["text_redaction_summary"] = self._text_redaction_summary
 
         return new_file_bytes
 
