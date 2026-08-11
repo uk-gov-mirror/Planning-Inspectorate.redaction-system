@@ -7,7 +7,7 @@ from PIL import Image
 from core.redaction.config import ImageRedactionConfig
 from core.redaction.redactor import ImageTextRedactor
 from core.redaction.result import ImageRedactionResult
-from core.util.azure_vision_util import AzureVisionUtil
+from core.util.image_analysis import AzureVisionUtil
 from test.util.util import compare_unashable_lists
 
 

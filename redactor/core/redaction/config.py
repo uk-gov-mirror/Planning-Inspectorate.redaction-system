@@ -32,11 +32,11 @@ class LLMUtilConfig(BaseModel):
         super().__init__(**data)
         if self.token_encoding_name is None:
             if self.model.startswith("gpt-5") or self.model.startswith("gpt-4o"):
-                self.token_encoding_name = "o200k_base"
+                self.token_encoding_name = "o200k_base"  # nosec: B105
             elif self.model.startswith("gpt-4") or self.model.startswith("gpt-3.5"):
-                self.token_encoding_name = "cl100k_base"
+                self.token_encoding_name = "cl100k_base"  # nosec: B105
             else:
-                self.token_encoding_name = "p50k_base"
+                self.token_encoding_name = "p50k_base"  # nosec: B105
 
 
 class RedactionConfig(BaseModel):
@@ -111,9 +111,20 @@ def xml_format(input: str | list, format_string: str, as_list: bool = False) -> 
 class ImageRedactionConfig(RedactionConfig):
     images: list[PydanticImage] | None = None
     """The images to redact"""
-    confidence_threshold: float | None = Field(0.5, ge=0.0, le=1.0)
-    """Confidence threshold between 0 and 1 for detections"""
+
+    class ConfidenceThresholdConfig(BaseModel):
+        """Confidence thresholds for object detect models. Values should be between 0
+        and 1.0"""
+
+        face_detection: float | None = Field(0.5, ge=0.0, le=1.0)
+        """Confidence threshold for face detection model"""
+        signature_detection: float | None = Field(0.5, ge=0.0, le=1.0)
+        """Confidence threshold for signature detection model"""
+
+    confidence_thresholds: ConfidenceThresholdConfig = ConfidenceThresholdConfig()
+    """Confidence thresholds for object detection models"""
 
 
-class ImageLLMTextRedactionConfig(ImageRedactionConfig, LLMTextRedactionConfig):
-    pass
+class ImageLLMTextRedactionConfig(LLMTextRedactionConfig):
+    images: list[PydanticImage] | None = None
+    """The images to redact"""

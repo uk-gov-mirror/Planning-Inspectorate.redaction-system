@@ -24,7 +24,7 @@ from core.redaction.result import (
     LLMTextRedactionResult,
     RedactionResult,
 )
-from core.util.azure_vision_util import AzureVisionUtil
+from core.util.image_analysis import AzureVisionUtil
 from core.util.llm_util import LLMUtil
 from core.util.logging_util import LoggingUtil, log_to_appins
 from core.util.metric_util import TimerUtil
@@ -177,18 +177,24 @@ class ImageRedactor(Redactor):  # pragma: no cover
 
     def redact(self) -> ImageRedactionResult:
         self.config: ImageRedactionConfig
-        results: list[ImageRedactionResult.Result] = []
-        total_images_to_analyse = len(self.config.images)
-        if total_images_to_analyse == 0:
+        self.total_images_to_analyse = len(self.config.images)
+        if self.total_images_to_analyse == 0:
             LoggingUtil().log_info("No images to analyse, skipping image analysis")
             return ImageRedactionResult(
                 rule_name=self.config.name,
                 run_metrics={},
                 redaction_results=(),
             )
+
+        return self.redact_faces()
+
+    def redact_faces(self) -> ImageRedactionResult:
+        confidence_threshold = self.config.confidence_thresholds.face_detection
+
+        results: list[ImageRedactionResult.Result] = []
         with TimerUtil() as timer:
             face_detection_results = AzureVisionUtil().detect_faces_in_images(
-                self.config.images, self.config.confidence_threshold
+                self.config.images, confidence_threshold
             )
             for image_to_redact, faces_detected in face_detection_results:
                 # If image analysis failed, the full image will be returned
@@ -216,7 +222,7 @@ class ImageRedactor(Redactor):  # pragma: no cover
             rule_name=self.config.name,
             run_metrics={
                 "total_image_analysis_time": timer.elapsed_time,
-                "total_images_to_analyse": total_images_to_analyse,
+                "total_images_to_analyse": self.total_images_to_analyse,
             },
             redaction_results=tuple(results),
         )

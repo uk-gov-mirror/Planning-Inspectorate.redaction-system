@@ -127,7 +127,7 @@ def trigger_task(params):
     # Import inside this function so that the function app has a chance to start
     # Exceptions will instead be raised when this function is trigger
     from core.redaction_manager import RedactionManager
-    from core.util.azure_vision_util import AzureVisionUtil
+    from core.util.image_analysis import AzureVisionUtil
     from core.util.logging_util import LoggingUtil
 
     # Clear static state from any previous invocation sharing this process
