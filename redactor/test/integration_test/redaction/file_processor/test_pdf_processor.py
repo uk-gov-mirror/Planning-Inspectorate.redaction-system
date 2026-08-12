@@ -9,6 +9,7 @@ from pymupdf import Rect
 
 from core.redaction.config import (
     ImageLLMTextRedactionConfig,
+    ImageRedactionConfig,
     LLMTextRedactionConfig,
 )
 from core.redaction.file_processor import PDFProcessor
@@ -32,6 +33,9 @@ SOURCE_IMAGE_PDF_PATH = os.path.join(
 )
 REDACTED_PDF_PATH = os.path.join(
     "test", "resources", "pdf", "test__pdf_processor__redacted.pdf"
+)
+SIGNATURE_PDF_PATH = os.path.join(
+    "test", "resources", "pdf", "test__pdf_processor__signature.pdf"
 )
 
 
@@ -662,6 +666,37 @@ class TestRedact:
             f"\nExpected results {expected_redacted_text}\nActual results: {actual_annotation_rects}"
         )
         assert match_percent >= acceptance_threshold, error_message
+
+    def test_returns_annotated_image_with_signature_pdf_bytes(self):
+        """
+        - Given I have a PDF with some an image of a signature
+        - When I call redact() with some config and the pdf content as bytes
+        - Then I should receive a new bytes object which contains the PDF with the signature highlighted
+        """
+        file_bytes = open_pdf_from_file(SIGNATURE_PDF_PATH)
+        pdf_before = pymupdf.open(stream=file_bytes)
+        page_annotations_before = get_pdf_annotations(
+            pdf_before, pymupdf.PDF_ANNOT_HIGHLIGHT
+        )
+        assert not page_annotations_before
+
+        redacted_file_bytes = PDFProcessor().redact(
+            file_bytes,
+            {
+                "redaction_rules": [
+                    ImageRedactionConfig(
+                        name="config name",
+                        redactor_type="ImageRedaction",
+                    )
+                ]
+            },
+        )
+
+        pdf_after = pymupdf.open(stream=redacted_file_bytes)
+        page_annotations_after = get_pdf_annotations(
+            pdf_after, pymupdf.PDF_ANNOT_HIGHLIGHT
+        )
+        assert page_annotations_after == []
 
 
 class TestApply:
