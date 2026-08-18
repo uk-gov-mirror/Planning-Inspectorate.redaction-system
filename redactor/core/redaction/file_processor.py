@@ -637,7 +637,12 @@ class PDFProcessor(FileProcessor):
         text_redaction_results: list[TextRedactionResult] = [
             x
             for x in self.redaction_results
-            if issubclass(x.__class__, TextRedactionResult)
+            if (
+                issubclass(x.__class__, TextRedactionResult)
+                and not issubclass(
+                    x.__class__, ImageRedactionResult
+                )  # exclude redaction strings on images only
+            )
         ]
         text_redactions = [
             " ".join(redaction_string.split("\n"))

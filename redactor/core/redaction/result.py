@@ -65,6 +65,11 @@ class TextRedactionResult(RedactionResult):
 
 
 @dataclass(frozen=True)
+class ImageTextRedactionResult(TextRedactionResult, ImageRedactionResult):
+    pass
+
+
+@dataclass(frozen=True)
 class LLMTextRedactionResult(TextRedactionResult):
     @dataclass(frozen=True)
     class LLMResultMetadata:
@@ -76,6 +81,11 @@ class LLMTextRedactionResult(TextRedactionResult):
 
     metadata: LLMResultMetadata = field(default=None)
     """Any metadata provided by the LLM"""
+
+
+@dataclass(frozen=True)
+class ImageLLMTextRedactionResult(LLMTextRedactionResult, ImageRedactionResult):
+    pass
 
 
 class LLMRedactionResultFormat(BaseModel):

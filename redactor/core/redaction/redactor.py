@@ -20,7 +20,9 @@ from core.redaction.exceptions import (
     RedactorNameNotFoundException,
 )
 from core.redaction.result import (
+    ImageLLMTextRedactionResult,
     ImageRedactionResult,
+    ImageTextRedactionResult,
     LLMTextRedactionResult,
     RedactionResult,
     TextRedactionResult,
@@ -167,7 +169,7 @@ class LLMTextRedactor(TextRedactor):
         return LLMTextRedactionResult(
             rule_name=self.config.name,
             run_metrics=llm_redaction_result.run_metrics,
-            redaction_strings=llm_redaction_result.redaction_strings,
+            redaction_strings=tuple(llm_redaction_result.redaction_strings),
             metadata=llm_redaction_result.metadata,
         )
 
@@ -306,6 +308,10 @@ class ImageTextRedactor(ImageRedactor, TextRedactor):
         return "ImageTextRedaction"
 
     @classmethod
+    def get_redaction_result_class(cls):
+        return ImageTextRedactionResult
+
+    @classmethod
     def detect_number_plates(cls, text_to_analyse: str) -> tuple[str]:
         """
         Detect number plates in the given text
@@ -415,7 +421,7 @@ class ImageTextRedactor(ImageRedactor, TextRedactor):
 
     def _get_number_plate_redactions(
         self, text_content, text_rect_map
-    ) -> tuple[list[tuple], float, float]:
+    ) -> tuple[tuple[str], list[tuple], float, float]:
         # Detect number plates using regex
         with TimerUtil() as timer:
             redaction_strings = self.detect_number_plates(text_content)
@@ -437,14 +443,16 @@ class ImageTextRedactor(ImageRedactor, TextRedactor):
                         )
         bbox_time = timer.elapsed_time
 
-        return (
-            text_rects_to_redact,
-            number_plate_detection_time,
-            bbox_time,
-        )
+        return {
+            "redaction_strings": redaction_strings,
+            "text_rects_to_redact": text_rects_to_redact,
+            "number_plate_detection_time": number_plate_detection_time,
+            "bbox_time": bbox_time,
+        }
 
     @log_to_appins
-    def redact(self) -> ImageRedactionResult:
+    def redact(self) -> ImageTextRedactionResult:
+        # Initialisation
         self.config: ImageRedactionConfig
         init_result = self._init_redact()
         if init_result:  # If there are no images to analyse, return the initial result
@@ -461,7 +469,7 @@ class ImageTextRedactor(ImageRedactor, TextRedactor):
                 LoggingUtil().log_info(
                     "No text detected in any images, skipping LLM analysis"
                 )
-                return ImageRedactionResult(
+                return ImageTextRedactionResult(
                     rule_name=self.config.name,
                     run_metrics=self.run_metrics,
                     redaction_results=(),
@@ -469,6 +477,7 @@ class ImageTextRedactor(ImageRedactor, TextRedactor):
 
             total_number_plate_time = 0.0
             total_bbox_time = 0.0
+            redaction_strings = []
             for image_to_redact, text_rect_map in image_text_rect_map:
                 # If image analysis failed, the full image will be returned
                 full_image_box = (0, 0, image_to_redact.width, image_to_redact.height)
@@ -480,14 +489,9 @@ class ImageTextRedactor(ImageRedactor, TextRedactor):
                         "Text detection failed for image, redacting full image"
                     )
                     results.append(
-                        ImageRedactionResult.Result(
-                            image_dimensions=(
-                                image_to_redact.width,
-                                image_to_redact.height,
-                            ),
-                            source_image=image_to_redact,
-                            redaction_boxes=(full_image_box,),
-                            names=("Text Detection Failed",),
+                        ImageRedactionResult.Result.from_image_analysis_results(
+                            [((full_image_box), "Text Detection Failed")],
+                            image_to_redact,
                         )
                     )
                     continue
@@ -503,19 +507,24 @@ class ImageTextRedactor(ImageRedactor, TextRedactor):
                         f"The following text was extracted from the image: '{text_content}'"
                     )
 
-                    text_rects_to_redact, number_plate_detection_time, bbox_time = (
-                        self._get_number_plate_redactions(text_content, text_rect_map)
+                    np_redaction_results = self._get_number_plate_redactions(
+                        text_content, text_rect_map
                     )
-                    total_number_plate_time += number_plate_detection_time
-                    total_bbox_time += bbox_time
+                    total_number_plate_time += np_redaction_results[
+                        "number_plate_detection_time"
+                    ]
+                    total_bbox_time += np_redaction_results["bbox_time"]
 
                     redaction_result = (
                         ImageRedactionResult.Result.from_image_analysis_results(
-                            text_rects_to_redact, image_to_redact
+                            np_redaction_results["text_rects_to_redact"],
+                            image_to_redact,
                         )
                     )
                     if redaction_result:
                         results.append(redaction_result)
+
+                    redaction_strings.extend(np_redaction_results["redaction_strings"])
 
                 except Exception as e:  # noqa: BLE001
                     LoggingUtil().log_exception_with_message(
@@ -530,10 +539,11 @@ class ImageTextRedactor(ImageRedactor, TextRedactor):
             }
         )
 
-        return ImageRedactionResult(
+        return ImageTextRedactionResult(
             rule_name=self.config.name,
             run_metrics=self.run_metrics,
             redaction_results=tuple(results),
+            redaction_strings=tuple(redaction_strings) if results else (),
         )
 
 
@@ -551,9 +561,13 @@ class ImageLLMTextRedactor(ImageTextRedactor, LLMTextRedactor):
     def get_redaction_config_class(cls):
         return ImageLLMTextRedactionConfig
 
+    @classmethod
+    def get_redaction_config_result(cls):
+        return ImageLLMTextRedactionResult
+
     def _analyse_image_text(
         self, image_text_rect_map: tuple[tuple[str, tuple[int, int, int, int]]]
-    ) -> tuple[dict[str, Any]]:
+    ) -> tuple[tuple[str, ...], tuple[dict[str, Any]]]:
         self.config: LLMTextRedactionConfig
 
         text_content = tuple(
@@ -562,7 +576,7 @@ class ImageLLMTextRedactor(ImageTextRedactor, LLMTextRedactor):
         )
         if all(not text for text in text_content):
             LoggingUtil().log_info("No text to analyse, skipping LLM analysis")
-            return None
+            return (), ()
         image_text_content = tuple(
             {
                 "image": image_to_redact,
@@ -603,13 +617,13 @@ class ImageLLMTextRedactor(ImageTextRedactor, LLMTextRedactor):
                 if redaction_string in image["text_content"]:
                     image["redaction_strings"].append(redaction_string)
 
-        return image_text_content
+        return tuple(redaction_strings), image_text_content
 
     @classmethod
     def _create_redaction_result(
         cls,
         image_result: dict[str, Any],
-    ) -> ImageRedactionResult.Result | None:
+    ) -> tuple[ImageRedactionResult.Result, float]:
         image_to_redact = image_result["image"]
         text_rect_map = image_result["text_rect_map"]
         text_content = image_result["text_content"]
@@ -646,7 +660,7 @@ class ImageLLMTextRedactor(ImageTextRedactor, LLMTextRedactor):
         return redaction_result, timer.elapsed_time
 
     @log_to_appins
-    def redact(self) -> ImageRedactionResult:
+    def redact(self) -> ImageLLMTextRedactionResult:
         self.config: ImageLLMTextRedactionConfig
         init_result = self._init_redact()
         if init_result:  # If there are no images to analyse, return the initial result
@@ -663,15 +677,15 @@ class ImageLLMTextRedactor(ImageTextRedactor, LLMTextRedactor):
                 LoggingUtil().log_info(
                     "No text detected in any images, skipping LLM analysis"
                 )
-                return ImageRedactionResult(
+                return ImageLLMTextRedactionResult(
                     rule_name=self.config.name,
                     run_metrics=self.run_metrics,
                     redaction_results=(),
                 )
 
             with TimerUtil() as llm_timer:
-                image_text_redaction_results = self._analyse_image_text(
-                    image_text_rect_map
+                redaction_strings, image_text_redaction_results = (
+                    self._analyse_image_text(image_text_rect_map)
                 )
             self.run_metrics["total_image_llm_analysis_time"] = llm_timer.elapsed_time
 
@@ -698,10 +712,11 @@ class ImageLLMTextRedactor(ImageTextRedactor, LLMTextRedactor):
         )
         self.run_metrics["total_image_text_analysis_time"] = timer.elapsed_time
 
-        return ImageRedactionResult(
+        return ImageLLMTextRedactionResult(
             rule_name=self.config.name,
             run_metrics=self.run_metrics,
             redaction_results=tuple(results),
+            redaction_strings=tuple(redaction_strings),
         )
 
 
