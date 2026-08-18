@@ -75,13 +75,13 @@ class LLMUtil:
     # Azure Foundry quota limits and cost in GBP per 1M tokens - correct on 06/01/26
     OPENAI_MODELS: ClassVar[dict[str, dict[str, int]]] = {
         "gpt-4.1": {
-            "token_rate_limit": 1000000,
+            "token_rate_limit": 1000000,  # nosec: B105
             "request_rate_limit": 1000,
             "input_cost": 149,
             "output_cost": 593,
         },
         "gpt-5.6-luna": {  # need to check these values
-            "token_rate_limit": 3000000,
+            "token_rate_limit": 3000000,  # nosec: B105
             "request_rate_limit": 3000,
             "input_cost": 149,
             "output_cost": 593,
@@ -422,8 +422,11 @@ class LLMUtil:
                 f"Starting text analysis on {chunk_count} chunks with {max_workers} "
                 "workers."
             )
-
-            if max_workers == 1:
+            if max_workers == 0:
+                LoggingUtil().log_info(
+                    "No text chunks to process. Returning empty result."
+                )
+            elif max_workers == 1:
                 # Process chunks sequentially if only one worker is allowed
                 for chunk in text_chunks:
                     response, redaction_strings = self._analyse_text_chunk(
