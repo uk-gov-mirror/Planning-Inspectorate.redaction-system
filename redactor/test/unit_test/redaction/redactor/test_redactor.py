@@ -15,6 +15,9 @@ class MyRedactorImpl(Redactor):
     def get_redaction_config_class(self):
         return None
 
+    def get_redaction_result_class(self):
+        return None
+
     def redact(self):
         return None
 

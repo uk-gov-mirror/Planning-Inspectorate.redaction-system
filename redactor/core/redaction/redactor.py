@@ -23,6 +23,7 @@ from core.redaction.result import (
     ImageRedactionResult,
     LLMTextRedactionResult,
     RedactionResult,
+    TextRedactionResult,
 )
 from core.util.image_analysis import AzureVisionUtil, SignatureDetector
 from core.util.llm_util import LLMUtil
@@ -61,6 +62,13 @@ class Redactor(ABC):
         """
 
     @classmethod
+    @abstractmethod
+    def get_redaction_result_class(cls) -> type[RedactionResult]:
+        """
+        :return: The RedactionResult class that redact returns
+        """
+
+    @classmethod
     def _validate_redaction_config(cls, config: RedactionConfig) -> bool:
         """
         Check that the given config is of the expected type
@@ -81,7 +89,6 @@ class Redactor(ABC):
         """
         Perform a redaction based on the given config
 
-
         :param RedactionConfig config: The configuration for the redaction
         :returns RedactionResult: A RedactionResult that holds the result of the
         redaction
@@ -96,6 +103,10 @@ class TextRedactor(Redactor):
     @classmethod
     def get_redaction_config_class(cls):
         return TextRedactionConfig
+
+    @classmethod
+    def get_redaction_result_class(cls):
+        return TextRedactionResult
 
 
 class LLMTextRedactor(TextRedactor):
@@ -116,6 +127,10 @@ class LLMTextRedactor(TextRedactor):
     @classmethod
     def get_redaction_config_class(cls):
         return LLMTextRedactionConfig
+
+    @classmethod
+    def get_redaction_result_class(cls):
+        return LLMTextRedactionResult
 
     @log_to_appins
     def _analyse_text(self, text_to_analyse: str) -> LLMTextRedactionResult:
@@ -175,20 +190,32 @@ class ImageRedactor(Redactor):  # pragma: no cover
     def get_redaction_config_class(cls):
         return ImageRedactionConfig
 
-    def redact(self) -> ImageRedactionResult:
-        self.config: ImageRedactionConfig
-        thresholds = self.config.confidence_thresholds
+    @classmethod
+    def get_redaction_result_class(cls):
+        return ImageRedactionResult
 
+    def _init_redact(self) -> ImageRedactionResult | None:
+        """
+        Initialise the redaction process. Returns ImageRedactionResult if there are no
+        images to analyse, so the redaction process can be skipped.
+        """
         self.total_images_to_analyse = len(self.config.images)
-        run_metrics = {"total_images_to_analyse": self.total_images_to_analyse}
+        self.run_metrics = {"total_images_to_analyse": self.total_images_to_analyse}
         if self.total_images_to_analyse == 0:
             LoggingUtil().log_info("No images to analyse, skipping image analysis")
-            return ImageRedactionResult(
+            return self.get_redaction_result_class()(
                 rule_name=self.config.name,
-                run_metrics=run_metrics,
+                run_metrics=self.run_metrics,
                 redaction_results=(),
             )
 
+    def redact(self) -> ImageRedactionResult:
+        self.config: ImageRedactionConfig
+        init_result = self._init_redact()
+        if init_result:  # If there are no images to analyse, return the initial result
+            return init_result
+
+        thresholds = self.config.confidence_thresholds
         detection_results = []
         for detection_function, detection_type in [
             (AzureVisionUtil.detect_faces_in_images, "face"),
@@ -202,17 +229,21 @@ class ImageRedactor(Redactor):  # pragma: no cover
                     )
                 )
                 detection_results.append(results)
-            run_metrics[f"total_{detection_type}_analysis_time"] = timer.elapsed_time
+            self.run_metrics[f"total_{detection_type}_analysis_time"] = (
+                timer.elapsed_time
+            )
 
-        run_metrics["total_image_analysis_time"] = sum(
-            run_metrics[metric] for metric in run_metrics if "analysis_time" in metric
+        self.run_metrics["total_image_analysis_time"] = sum(
+            self.run_metrics[metric]
+            for metric in self.run_metrics
+            if "analysis_time" in metric
         )
 
         redaction_results = self._create_redaction_results(detection_results)
 
         return ImageRedactionResult(
             rule_name=self.config.name,
-            run_metrics=run_metrics,
+            run_metrics=self.run_metrics,
             redaction_results=redaction_results,
         )
 
@@ -414,31 +445,30 @@ class ImageTextRedactor(ImageRedactor, TextRedactor):
 
     @log_to_appins
     def redact(self) -> ImageRedactionResult:
-        # Initialisation
         self.config: ImageRedactionConfig
-        results = []
-        total_images_to_analyse = len(self.config.images)
+        init_result = self._init_redact()
+        if init_result:  # If there are no images to analyse, return the initial result
+            return init_result
 
+        results = []
         with TimerUtil() as timer:
             image_text_rect_map, total_ocr_time = self._analyse_images()
+            self.run_metrics["total_image_ocr_time"] = (total_ocr_time,)
 
             if not image_text_rect_map:
                 timer.__exit__(None, None, None)
+                self.run_metrics["total_image_text_analysis_time"] = timer.elapsed_time
                 LoggingUtil().log_info(
                     "No text detected in any images, skipping LLM analysis"
                 )
                 return ImageRedactionResult(
                     rule_name=self.config.name,
-                    run_metrics={
-                        "total_images_to_analyse": total_images_to_analyse,
-                        "total_image_text_analysis_time": timer.elapsed_time,
-                        "total_image_ocr_time": total_ocr_time,
-                    },
+                    run_metrics=self.run_metrics,
                     redaction_results=(),
                 )
 
-            total_number_plate_detection_time = 0.0
-            total_bounding_box_time = 0.0
+            total_number_plate_time = 0.0
+            total_bbox_time = 0.0
             for image_to_redact, text_rect_map in image_text_rect_map:
                 # If image analysis failed, the full image will be returned
                 full_image_box = (0, 0, image_to_redact.width, image_to_redact.height)
@@ -476,8 +506,8 @@ class ImageTextRedactor(ImageRedactor, TextRedactor):
                     text_rects_to_redact, number_plate_detection_time, bbox_time = (
                         self._get_number_plate_redactions(text_content, text_rect_map)
                     )
-                    total_number_plate_detection_time += number_plate_detection_time
-                    total_bounding_box_time += bbox_time
+                    total_number_plate_time += number_plate_detection_time
+                    total_bbox_time += bbox_time
 
                     redaction_result = (
                         ImageRedactionResult.Result.from_image_analysis_results(
@@ -492,15 +522,17 @@ class ImageTextRedactor(ImageRedactor, TextRedactor):
                         "Error analysing image for text redaction:", e
                     )
 
+        self.run_metrics.update(
+            {
+                "total_image_number_plate_detection_time": total_number_plate_time,
+                "total_image_text_bounding_box_matching_time": total_bbox_time,
+                "total_image_text_analysis_time": timer.elapsed_time,
+            }
+        )
+
         return ImageRedactionResult(
             rule_name=self.config.name,
-            run_metrics={
-                "total_images_to_analyse": total_images_to_analyse,
-                "total_image_text_analysis_time": timer.elapsed_time,
-                "total_image_ocr_time": total_ocr_time,
-                "total_image_number_plate_detection_time": total_number_plate_detection_time,
-                "total_image_text_bounding_box_matching_time": total_bounding_box_time,
-            },
+            run_metrics=self.run_metrics,
             redaction_results=tuple(results),
         )
 
@@ -615,25 +647,25 @@ class ImageLLMTextRedactor(ImageTextRedactor, LLMTextRedactor):
 
     @log_to_appins
     def redact(self) -> ImageRedactionResult:
-        # Initialisation
         self.config: ImageLLMTextRedactionConfig
-        results = []
-        run_metrics = {}
-        run_metrics["total_images_to_analyse"] = len(self.config.images)
+        init_result = self._init_redact()
+        if init_result:  # If there are no images to analyse, return the initial result
+            return init_result
 
+        results = []
         with TimerUtil() as timer:
             image_text_rect_map, total_ocr_time = self._analyse_images()
-            run_metrics["total_image_ocr_time"] = total_ocr_time
+            self.run_metrics["total_image_ocr_time"] = total_ocr_time
 
             if not image_text_rect_map:
                 timer.__exit__(None, None, None)
-                run_metrics["total_image_text_analysis_time"] = timer.elapsed_time
+                self.run_metrics["total_image_text_analysis_time"] = timer.elapsed_time
                 LoggingUtil().log_info(
                     "No text detected in any images, skipping LLM analysis"
                 )
                 return ImageRedactionResult(
                     rule_name=self.config.name,
-                    run_metrics=run_metrics,
+                    run_metrics=self.run_metrics,
                     redaction_results=(),
                 )
 
@@ -641,14 +673,14 @@ class ImageLLMTextRedactor(ImageTextRedactor, LLMTextRedactor):
                 image_text_redaction_results = self._analyse_image_text(
                     image_text_rect_map
                 )
-            run_metrics["total_image_llm_analysis_time"] = llm_timer.elapsed_time
+            self.run_metrics["total_image_llm_analysis_time"] = llm_timer.elapsed_time
 
             if not image_text_redaction_results:
                 timer.__exit__(None, None, None)
-                run_metrics["total_image_text_analysis_time"] = timer.elapsed_time
+                self.run_metrics["total_image_text_analysis_time"] = timer.elapsed_time
                 return ImageRedactionResult(
                     rule_name=self.config.name,
-                    run_metrics=run_metrics,
+                    run_metrics=self.run_metrics,
                     redaction_results=(),
                 )
 
@@ -661,14 +693,14 @@ class ImageLLMTextRedactor(ImageTextRedactor, LLMTextRedactor):
                 if redaction_result:
                     results.append(redaction_result)
 
-        run_metrics["total_image_text_bounding_box_matching_time"] = (
+        self.run_metrics["total_image_text_bounding_box_matching_time"] = (
             total_bounding_box_time
         )
-        run_metrics["total_image_text_analysis_time"] = timer.elapsed_time
+        self.run_metrics["total_image_text_analysis_time"] = timer.elapsed_time
 
         return ImageRedactionResult(
             rule_name=self.config.name,
-            run_metrics=run_metrics,
+            run_metrics=self.run_metrics,
             redaction_results=tuple(results),
         )
 
