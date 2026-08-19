@@ -60,7 +60,7 @@ class ImageRedactionResult(RedactionResult):
 
 @dataclass(frozen=True)
 class TextRedactionResult(RedactionResult):
-    redaction_strings: tuple[str] = field(default_factory=list)
+    redaction_strings: tuple[str] = field(default_factory=lambda: ())
     """The list of strings to redact"""
 
 
