@@ -455,7 +455,8 @@ class TestRedact:
         )
         assert not page_annotations_before
 
-        redacted_file_bytes = PDFProcessor().redact(
+        pdf_processor = PDFProcessor()
+        redacted_file_bytes = pdf_processor.redact(
             file_bytes, create_config(is_image=True)
         )
 
@@ -656,6 +657,18 @@ class TestRedact:
             f"\nExpected results {expected_redacted_text}\nActual results: {actual_annotation_rects}"
         )
         assert match_percent >= acceptance_threshold, error_message
+
+        run_metrics = pdf_processor.get_run_metrics()
+        assert run_metrics["unapplied_text_redaction_terms"] == []
+
+        text_redaction_summary = run_metrics["text_redaction_summary"]
+        image_text_summary = text_redaction_summary.get("config name")
+        assert image_text_summary is not None
+
+        n_proposed = image_text_summary["n_proposed"]
+        assert n_proposed > 0
+        # All should be applied
+        assert image_text_summary["n_applied"] == n_proposed
 
     @pytest.mark.skip(
         reason="This test will not pass until NRR-248 (analyse flattened/printed PDfs) is implemented"
