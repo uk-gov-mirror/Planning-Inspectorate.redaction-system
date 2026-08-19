@@ -29,7 +29,7 @@ class TestPDFUtil:
             instances_to_redact.extend(
                 PDFUtil.examine_provisional_text_redaction(
                     term,
-                    PDFUtil.extract_page_text(pdf[0]),
+                    PDFUtil.extract_page_metadata(pdf[0]),
                 )
             )
 

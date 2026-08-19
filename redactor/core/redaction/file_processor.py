@@ -27,6 +27,7 @@ from core.redaction.result import (
     RedactionResult,
     TextRedactionResult,
 )
+from core.util.image_analysis import AzureVisionUtil
 from core.util.logging_util import LoggingUtil, log_to_appins
 from core.util.metric_util import MetricUtil, TimerUtil
 from core.util.pdf_util import (
@@ -347,7 +348,7 @@ class PDFProcessor(FileProcessor):
             self.terms_found[term] = 0
         for i, page in enumerate(pdf):
             if i == 0:
-                page_metadata = PDFUtil.extract_page_text(page)
+                page_metadata = PDFUtil.extract_page_metadata(page)
                 next_page_metadata = PDFUtil.get_next_page_metadata(pdf, page.number)
             else:
                 page_metadata = next_page_metadata
@@ -451,7 +452,6 @@ class PDFProcessor(FileProcessor):
         self,
         file_bytes: BytesIO,
         redactions: list[ImageRedactionResult],
-        pdf_images: list[PDFImageMetadata] | None = None,
     ):
         """
         Redact the given list of bounding boxes as provisional redactions in the
@@ -459,17 +459,24 @@ class PDFProcessor(FileProcessor):
 
         :param BytesIO file_bytes: Bytes stream for the PDF
         :param list[ImageRedactionResult] redactions: The results of the image redaction analysis
+
         :return BytesIO: Bytes stream for the PDF with provisional image redactions applied
         """
         pdf = pymupdf.open(stream=file_bytes)
         pages = [page for page in pdf]
-        if pdf_images is None:
-            pdf_images = PDFUtil.extract_pdf_images(file_bytes)
-            if not pdf_images:
-                LoggingUtil().log_info(
-                    "No images found in PDF, skipping provisional image redactions."
-                )
-                return file_bytes
+
+        rendered_page_images = [
+            page.rendered_image
+            for page in self.pages_metadata
+            if page.rendered_image is not None
+        ]
+        pdf_images = self.pdf_images + rendered_page_images
+        if not pdf_images:
+            LoggingUtil().log_info(
+                "No images found in PDF, skipping provisional image redactions."
+            )
+            return file_bytes
+
         pdf_images_cleaned = [
             pdf_image.image.convert("RGB") for pdf_image in pdf_images
         ]
@@ -481,17 +488,14 @@ class PDFProcessor(FileProcessor):
             if metadata.redaction_boxes  # Only include candidates with bounding boxes to redact
         ]
 
-        for (
-            redaction_candidate_metadata,
-            redaction_candidate_image,
-        ) in redaction_candidates:
-            bounding_boxes = redaction_candidate_metadata.redaction_boxes
-            redaction_names = redaction_candidate_metadata.names
+        for candidate_metadata, candidate_image in redaction_candidates:
+            bounding_boxes = candidate_metadata.redaction_boxes
+            redaction_names = candidate_metadata.names
 
             for pdf_image_metadata, pdf_image_cleaned in zip(
                 pdf_images, pdf_images_cleaned
             ):
-                if redaction_candidate_image != pdf_image_cleaned:
+                if candidate_image != pdf_image_cleaned:
                     continue
 
                 # Match found for redaction candidate
@@ -546,18 +550,91 @@ class PDFProcessor(FileProcessor):
         new_file_bytes.seek(0)
         return new_file_bytes
 
+    @log_to_appins
+    def _extract_pdf_text_content(self, file_bytes: BytesIO) -> None:
+        """
+        Examine the given PDF and extract the text content for each page.
+        If the PDF has no text content, the pages will be rendered to images for OCR
+        text extraction.
+        """
+        pdf = pymupdf.open(stream=file_bytes)
+        self.pages_metadata: list[PDFPageMetadata] = []
+        for page in pdf:
+            page_metadata = PDFUtil.extract_page_content(page)
+            self.pages_metadata.append(page_metadata)
+
+        # Apply OCR to pages with no text content
+        pages_rendered = [
+            page for page in self.pages_metadata if page.rendered_image is not None
+        ]
+        if pages_rendered:
+            LoggingUtil().log_info(
+                f"{len(pages_rendered)} pages have no text content, applying OCR "
+                f"to extract text from PDF image."
+            )
+            with TimerUtil() as timer:
+                ocr_results = AzureVisionUtil.detect_text_in_images(
+                    [page.rendered_image.image for page in pages_rendered]
+                )
+            self.run_metrics["rendered_page_ocr_time"] = timer.elapsed_time
+            for ocr_result in ocr_results:
+                image, text_rect_entries = ocr_result
+                page = next(
+                    page
+                    for page in pages_rendered
+                    if page.rendered_image.image == image
+                )
+                if text_rect_entries:
+                    page.rendered_image.text_rect_map = tuple(
+                        PDFImageMetadata.TextRectMapEntry(text=text, rect=rect)
+                        for text, rect in text_rect_entries
+                    )
+                    page.raw_text = "\n".join(
+                        entry.text for entry in page.rendered_image.text_rect_map
+                    )
+                    LoggingUtil().log_info(
+                        f"OCR text extracted from rendered image on page {page.page_number}: "
+                        f"'{page.raw_text}'"
+                    )
+                else:
+                    LoggingUtil().log_info(
+                        f"No OCR text extracted from rendered image on page {page.page_number}."
+                    )
+
     def _extract_pdf_text_and_images(
         self, file_bytes: BytesIO
     ) -> tuple[str, list[PDFImageMetadata]]:
-        # Extract text from PDF
+        # Get PDFPageMetadata for each page in the PDF
         with TimerUtil() as timer:
-            self.pdf_text = PDFUtil.extract_pdf_text(file_bytes)
-        self.run_metrics["pdf_text_extraction_time"] = timer.elapsed_time
-        LoggingUtil().log_info(
-            f"The following text was extracted from the PDF:\n'{self.pdf_text}'"
-        )
+            self._extract_pdf_text_content(file_bytes)
+            # Only include non-printed text content for LLM text redaction
+            pages_text = [
+                page.raw_text
+                for page in self.pages_metadata
+                if page.rendered_image is None
+            ]
+            if all(text == "" for text in pages_text):
+                self.pdf_text = None
+            else:
+                self.pdf_text = "\n".join(pages_text)
 
-        if self.pdf_text and not is_english_text(self.pdf_text):
+            rendered_page_text = [
+                page.raw_text for page in self.pages_metadata if page.rendered_image
+            ]
+            self.rendered_pdf_text = "\n".join(rendered_page_text)
+        self.run_metrics["pdf_text_extraction_time"] = timer.elapsed_time
+
+        if self.pdf_text:
+            LoggingUtil().log_info(
+                f"The following text was extracted from the PDF:\n'{self.pdf_text}'"
+            )
+        if rendered_page_text:
+            LoggingUtil().log_info(
+                f"The following text was extracted from the rendered page images:\n'{self.rendered_pdf_text}'"
+            )
+
+        texts_to_check = [t for t in (self.pdf_text, self.rendered_pdf_text) if t]
+        if texts_to_check and not all(is_english_text(t) for t in texts_to_check):
             exception = NonEnglishContentException(
                 "Language check: non-English or insufficient English content "
                 "detected; skipping provisional redactions."
@@ -604,9 +681,33 @@ class PDFProcessor(FileProcessor):
 
         # Attach text and images to redaction configs
         for rule in self.redaction_rules:
-            if hasattr(rule, "text"):
+            if hasattr(rule, "text") and hasattr(rule, "images"):
+                # Analyse rendered printed pages with text only
+                pages_rendered = [
+                    page
+                    for page in self.pages_metadata
+                    if page.rendered_image and page.rendered_image.text_rect_map
+                ]
+                rule.text = self.rendered_pdf_text if self.rendered_pdf_text else None
+                rule.rendered_images = (
+                    [page.rendered_image for page in pages_rendered]
+                    if pages_rendered
+                    else None
+                )
+                if pages_rendered:
+                    # Only include images that are not included in the rendered pages
+                    images_to_analyse = [
+                        image
+                        for image in self.pdf_images
+                        if image.page_number
+                        not in [page.page_number for page in pages_rendered]
+                    ]
+                    rule.images = PDFUtil.extract_unique_pdf_images(images_to_analyse)
+                else:
+                    rule.images = unique_pdf_images
+            elif hasattr(rule, "text"):
                 rule.text = self.pdf_text
-            if hasattr(rule, "images"):
+            elif hasattr(rule, "images"):
                 rule.images = unique_pdf_images
 
         # Generate list of rules to apply
@@ -723,16 +824,13 @@ class PDFProcessor(FileProcessor):
         LoggingUtil().log_info("Text redactions applied")
 
         # Apply image redactions
-        if self.pdf_images:
-            LoggingUtil().log_info("Applying image redactions")
-            with TimerUtil() as timer:
-                new_file_bytes = self._apply_provisional_image_redactions(
-                    new_file_bytes, image_redactions, pdf_images=self.pdf_images
-                )
-            LoggingUtil().log_info("Image redactions applied")
-            self.run_metrics["image_redaction_apply_time"] = timer.elapsed_time
-        else:
-            self.run_metrics["image_redaction_apply_time"] = 0.0
+        LoggingUtil().log_info("Applying image redactions")
+        with TimerUtil() as timer:
+            new_file_bytes = self._apply_provisional_image_redactions(
+                new_file_bytes, image_redactions
+            )
+        self.run_metrics["image_redaction_apply_time"] = timer.elapsed_time
+        LoggingUtil().log_info("Image redactions applied")
 
         # Update run metrics with unapplied text redaction terms and summary
         self.run_metrics["unapplied_text_redaction_terms"] = [

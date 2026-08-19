@@ -30,6 +30,15 @@ class PDFImageMetadata(BaseModel):
     image_transform_in_pdf: tuple[float, float, float, float, float, float]
     """The transform of the instance of the image in the PDF, represented as a pymupdf.Matrix"""
 
+    class TextRectMapEntry(BaseModel):
+        text: str
+        """The text content of the bounding box"""
+        rect: tuple[float, float, float, float]
+        """The bounding box coordinates of the text in the image"""
+
+    text_rect_map: tuple[TextRectMapEntry, ...] = ()
+    """A mapping of text content to its bounding box coordinates in the image"""
+
 
 class PDFLineMetadata(BaseModel):
     line_number: int
@@ -73,11 +82,12 @@ class PDFLineMetadata(BaseModel):
 class PDFPageMetadata(BaseModel):
     page_number: int
     """The page the image belongs to (0-indexed)"""
-    """The text content of the page"""
     lines: list[PDFLineMetadata] = []
     """The metadata for the text content of the page"""
     raw_text: str
     """The full text content of the page"""
+    rendered_image: PDFImageMetadata | None = None
+    """The rendered image of the page, if the page has no text content"""
 
 
 class PDFUtil:
@@ -104,7 +114,9 @@ class PDFUtil:
         )
 
     @classmethod
-    def extract_page_text(cls, page: pymupdf.Page) -> PDFPageMetadata:
+    def extract_page_metadata(
+        cls, page: pymupdf.Page, raw_text: str | None = None
+    ) -> PDFPageMetadata:
         """
         Extract text content and metadata from a PDF page.
 
@@ -148,7 +160,9 @@ class PDFUtil:
         return PDFPageMetadata(
             page_number=page.number,
             lines=lines,
-            raw_text=cls.get_clean_page_text(page),
+            raw_text=raw_text
+            if raw_text is not None
+            else cls.get_clean_page_text(page),
         )
 
     @staticmethod
@@ -162,6 +176,37 @@ class PDFUtil:
         )
 
     @classmethod
+    def extract_page_content(cls, page: pymupdf.Page) -> PDFPageMetadata:
+        page_text = cls.get_clean_page_text(page)
+        if page_text == "":
+            render_dpi = 150
+            pix = page.get_pixmap(dpi=render_dpi)
+            image = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+            # transform_bounding_box_to_global_space normalises by image dims first,
+            # so the matrix must map [0,1] → page points
+            page_rect = page.rect
+            return PDFPageMetadata(
+                page_number=page.number,
+                lines=[],
+                raw_text=page_text,
+                rendered_image=PDFImageMetadata(
+                    source_image_resolution=(pix.width, pix.height),
+                    file_format="png",
+                    image=image,
+                    page_number=page.number,
+                    image_transform_in_pdf=(
+                        page_rect.width,
+                        0.0,
+                        0.0,
+                        page_rect.height,
+                        0.0,
+                        0.0,
+                    ),
+                ),
+            )
+        return cls.extract_page_metadata(page, raw_text=page_text)
+
+    @classmethod
     def extract_pdf_text(cls, file_bytes: BytesIO) -> str:
         """
         Return text content of the given PDF
@@ -170,11 +215,11 @@ class PDFUtil:
         :return str: The text content of the PDF
         """
         pdf = pymupdf.open(stream=file_bytes)
-        pages = [cls.get_clean_page_text(page) for page in pdf]
+        text = [cls.get_clean_page_text(page) for page in pdf]
 
-        if all(page == "" for page in pages):  # No text found on any page
+        if all(t == "" for t in text):  # No text found on any page
             return None
-        return "\n".join(page for page in pages)
+        return "\n".join(text)
 
     @classmethod
     def extract_pdf_images(cls, file_bytes: BytesIO) -> list[PDFImageMetadata]:
@@ -702,7 +747,7 @@ class PDFUtil:
         is no next page
         """
         return (
-            cls.extract_page_text(pdf[page_number + 1])
+            cls.extract_page_metadata(pdf[page_number + 1])
             if page_number + 1 < len(pdf)
             else None
         )

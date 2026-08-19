@@ -129,3 +129,6 @@ class ImageRedactionConfig(RedactionConfig):
 class ImageLLMTextRedactionConfig(LLMTextRedactionConfig):
     images: list[PydanticImage] | None = None
     """The images to redact"""
+
+    rendered_images: list | None = None
+    """list[PDFImageMetadata] for rendered page images with pre-populated text_rect_map"""

@@ -261,13 +261,13 @@ class ImageRedactor(Redactor):  # pragma: no cover
             object_names: list[str] = []
 
             for detection_result in detection_results:
-                image_to_redact, objects_detected = detection_result[i]
+                matched_result = next(
+                    (result for result in detection_result if result[0] == image), None
+                )
+                if matched_result is None:
+                    continue
 
-                # Should match since result is returned for all images
-                if image_to_redact != image:
-                    raise ValueError(
-                        f"Image mismatch in detection results: expected {image}, got {image_to_redact}"
-                    )
+                image_to_redact, objects_detected = matched_result
 
                 if len(objects_detected) == 0:
                     continue
@@ -410,7 +410,7 @@ class ImageTextRedactor(ImageRedactor, TextRedactor):
 
     def _analyse_images(
         self,
-    ) -> tuple[list[tuple[Image.Image, tuple[tuple[str, tuple]]]], float]:
+    ) -> tuple[tuple[tuple[Image.Image, tuple[tuple[str, tuple]]]], float]:
         if len(self.config.images) == 0:
             LoggingUtil().log_info("No images to analyse, skipping image text analysis")
             return [], 0.0
@@ -568,6 +568,16 @@ class ImageLLMTextRedactor(ImageTextRedactor, LLMTextRedactor):
     def _analyse_image_text(
         self, image_text_rect_map: tuple[tuple[str, tuple[int, int, int, int]]]
     ) -> tuple[tuple[str, ...], tuple[dict[str, Any]]]:
+        """
+        Analyse the text in the given images using an LLM.
+
+        :param tuple[tuple[str, tuple[int, int, int, int]]] image_text_rect_map: A
+        list of tuples of the form (image, text_rect_map) where text_rect_map is a
+        list of tuples of the form (text_at_box, bounding_box)
+
+        :return List[Dict[str, Any]]: A list of dictionaries containing the image,
+        text_rect_map, text_content, text_chunks, and redaction_strings for each image
+        """
         self.config: LLMTextRedactionConfig
 
         text_content = tuple(
@@ -663,13 +673,32 @@ class ImageLLMTextRedactor(ImageTextRedactor, LLMTextRedactor):
     def redact(self) -> ImageLLMTextRedactionResult:
         self.config: ImageLLMTextRedactionConfig
         init_result = self._init_redact()
-        if init_result:  # If there are no images to analyse, return the initial result
+        rendered_images = self.config.rendered_images
+        if (
+            init_result and not rendered_images
+        ):  # If there are no images to analyse, return the initial result
             return init_result
 
         results = []
         with TimerUtil() as timer:
-            image_text_rect_map, total_ocr_time = self._analyse_images()
-            self.run_metrics["total_image_ocr_time"] = total_ocr_time
+            if not init_result:  # If there are images to analyse, perform OCR on them
+                image_text_rect_map, total_ocr_time = self._analyse_images()
+                self.run_metrics["total_image_ocr_time"] = total_ocr_time
+            else:
+                image_text_rect_map = []
+
+            if self.config.rendered_images:
+                # Rendered images already have OCR results in text_rect_map
+                image_text_rect_map += tuple(
+                    (
+                        rendered_image.image,
+                        tuple(
+                            (image_text.text, image_text.rect)
+                            for image_text in rendered_image.text_rect_map
+                        ),
+                    )
+                    for rendered_image in self.config.rendered_images
+                )
 
             if not image_text_rect_map:
                 timer.__exit__(None, None, None)
