@@ -15,6 +15,7 @@ from core.redaction.result import (
     ImageRedactionResult,
     TextRedactionResult,
 )
+from core.util.image_analysis import AzureVisionUtil
 from core.util.pdf_util import (
     PDFImageMetadata,
     PDFLineMetadata,
@@ -450,7 +451,7 @@ class TestApplyProvisionalTextRedactions(TestExamineApplyRedactionsBase):
         with (
             patch.object(
                 PDFUtil,
-                "extract_page_text",
+                "extract_page_metadata",
                 return_value=page_metadata,
             ),
             patch.object(
@@ -560,6 +561,154 @@ class TestApplyRedactionRules:
             },
         }
         assert processor._text_redaction_summary == expected_text_redaction_summary
+class TestExtractPDFTextContent(TestExamineApplyRedactionsBase):
+    def test_pdf_with_text_returns_text_content(self):
+        text_on_page = "Hello World"
+        file_bytes = _make_pdf_with_text(text_on_page)
+
+        page_metadata = self.create_mock_page_metadata(
+            page_number=0,
+            text_content=text_on_page,
+            lines=[text_on_page],
+            y0=[0],
+            y1=[10],
+            x0=[[0]],
+            x1=[[10]],
+        )
+        with (
+            patch.object(
+                PDFUtil,
+                "extract_page_content",
+                return_value=page_metadata,
+            ),
+            patch.object(
+                AzureVisionUtil, "detect_text_in_images"
+            ) as mock_detect_text_in_images,
+        ):
+            pdf_processor = PDFProcessor()
+            pdf_processor._extract_pdf_text_content(file_bytes)
+
+        mock_detect_text_in_images.assert_not_called()
+
+        result_metadata = pdf_processor.pages_metadata
+        assert len(result_metadata) == 1
+
+        actual_page_metadata = result_metadata[0]
+        assert actual_page_metadata == page_metadata
+        assert actual_page_metadata.rendered_image is None
+
+    def test_pdf_without_text_returns_printed_text(self):
+        doc = pymupdf.open()
+        doc.new_page()
+        file_bytes = BytesIO()
+        doc.save(file_bytes)
+        file_bytes.seek(0)
+        image = Image.new("RGB", (100, 100), color="white")
+        page_metadata = self.create_mock_page_metadata(
+            page_number=0,
+            text_content="",
+            lines=[],
+            y0=[],
+            y1=[],
+            x0=[],
+            x1=[],
+        )
+        page_metadata.rendered_image = PDFImageMetadata(
+            source_image_resolution=(100, 100),
+            file_format="png",
+            image=image,
+            page_number=0,
+            image_transform_in_pdf=(0.48, 0.0, 0.0, 0.48, 0.0, 0.0),
+        )
+
+        printed_text_on_page = "Hello World"
+        text_rect_map = (printed_text_on_page, (0, 0, 10, 10))
+        detect_text_return_value = (
+            (
+                image,
+                (text_rect_map,),
+            ),
+        )
+
+        with (
+            patch.object(
+                PDFUtil,
+                "extract_page_content",
+                return_value=page_metadata,
+            ),
+            patch.object(
+                AzureVisionUtil,
+                "detect_text_in_images",
+                return_value=detect_text_return_value,
+            ) as mock_detect_text_in_images,
+        ):
+            pdf_processor = PDFProcessor()
+            pdf_processor._extract_pdf_text_content(file_bytes)
+
+        mock_detect_text_in_images.assert_called_once()
+
+        result_metadata = pdf_processor.pages_metadata
+        assert len(result_metadata) == 1
+
+        actual_page_metadata = result_metadata[0]
+        assert actual_page_metadata.raw_text == printed_text_on_page
+
+        rendered_image = actual_page_metadata.rendered_image
+        assert rendered_image is not None
+        assert rendered_image.image == image
+        assert len(rendered_image.text_rect_map) == 1
+        assert rendered_image.text_rect_map[0].text == printed_text_on_page
+        assert rendered_image.text_rect_map[0].rect == (0, 0, 10, 10)
+
+
+class TestExtractPDFTextAndImages(TestExamineApplyRedactionsBase):
+    def test_pdf_with_text_and_images_assigns_text_and_images(self):
+        text_on_page = "Hello World"
+        file_bytes = _make_pdf_with_text(text_on_page)
+
+        page_metadata = self.create_mock_page_metadata(
+            page_number=0,
+            text_content=text_on_page,
+            lines=[text_on_page],
+            y0=[0],
+            y1=[10],
+            x0=[[0]],
+            x1=[[10]],
+        )
+        image_metadata = PDFImageMetadata(
+            source_image_resolution=(100, 100),
+            file_format="jpeg",
+            image=Image.new("RGB", (100, 100), color="white"),
+            page_number=0,
+            image_transform_in_pdf=(1.0, 0.0, 0.0, 1.0, 0.0, 0.0),
+        )
+
+        with (
+            patch.object(
+                PDFUtil,
+                "extract_page_content",
+                return_value=page_metadata,
+            ),
+            patch.object(
+                PDFUtil,
+                "extract_pdf_images",
+                return_value=[image_metadata],
+            ),
+            patch("core.redaction.file_processor.is_english_text", return_value=True),
+        ):
+            pdf_processor = PDFProcessor()
+            pdf_processor._extract_pdf_text_and_images(file_bytes)
+
+        result_metadata = pdf_processor.pages_metadata
+        assert len(result_metadata) == 1
+
+        actual_page_metadata = result_metadata[0]
+        assert actual_page_metadata == page_metadata
+        assert actual_page_metadata.rendered_image is None
+
+        result_images = pdf_processor.pdf_images
+        assert len(result_images) == 1
+        assert result_images[0] == image_metadata
 
 
 class TestRedact:
@@ -644,6 +793,7 @@ class TestRedact:
         with (
             patch.object(PDFUtil, "extract_pdf_images", return_value=[]),
             patch.object(PDFUtil, "extract_unique_pdf_images", return_value=[]),
+            patch("core.redaction.file_processor.is_english_text", return_value=True),
             patch.object(
                 PDFProcessor,
                 "_apply_provisional_text_redactions",
@@ -759,10 +909,16 @@ class TestApplyProvisionalImageRedactions:
         ]
 
         # Apply provisional image redactions to the PDF
-        with patch.object(
-            PDFUtil, "extract_pdf_images", return_value=pdf_image_metadata
+        with (
+            patch.object(PDFUtil, "__init__", return_value=None),
+            patch.object(
+                PDFUtil, "extract_pdf_images", return_value=pdf_image_metadata
+            ),
         ):
-            redacted_doc_bytes = PDFProcessor()._apply_provisional_image_redactions(
+            pdf_processor = PDFProcessor()
+            pdf_processor.pages_metadata = [PDFUtil.extract_page_content(pdf[0])]
+            pdf_processor.pdf_images = pdf_image_metadata
+            redacted_doc_bytes = pdf_processor._apply_provisional_image_redactions(
                 doc_bytes, redactions
             )
         actual_annotated_rects = self._get_annotated_rects(redacted_doc_bytes)

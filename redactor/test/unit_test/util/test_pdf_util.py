@@ -76,7 +76,7 @@ class TestExtractPDFText:
             patch("pymupdf.open", return_value=mock_document),
             patch(
                 "pymupdf.Page.get_text",
-                side_effect=["This is a test of zero-\u200bwidth spaces."],
+                return_value="This is a test of zero-\u200bwidth spaces.",
             ),
         ):
             actual_text = PDFUtil.extract_pdf_text(BytesIO())
@@ -253,7 +253,7 @@ class TestCreateLineMetadata:
         assert expected_line_metadata == line_metadata
 
 
-class TestExtractPageText:
+class TestExtractPageMetadata:
     def test_returns_page_metadata(self):
         page = pymupdf.open().new_page()
 
@@ -268,7 +268,7 @@ class TestExtractPageText:
             return "Hello World! Hey there"
 
         with patch.object(pymupdf.Page, "get_text", mock_get_text):
-            page_metadata = PDFUtil.extract_page_text(page)
+            page_metadata = PDFUtil.extract_page_metadata(page)
 
         expected_page_metadata = PDFPageMetadata(
             page_number=page.number,
@@ -294,6 +294,71 @@ class TestExtractPageText:
         )
 
         assert expected_page_metadata == page_metadata
+
+    def test_uses_provided_raw_text(self):
+        page = pymupdf.open().new_page()
+        provided_raw_text = "This is the provided raw text."
+        with (
+            patch.object(pymupdf.Page, "get_text"),
+            patch.object(PDFUtil, "get_clean_page_text") as mock_get_text,
+        ):
+            page_metadata = PDFUtil.extract_page_metadata(
+                page, raw_text=provided_raw_text
+            )
+
+        assert page_metadata.raw_text == provided_raw_text
+        mock_get_text.assert_not_called()
+
+
+class ExtractPageContent:
+    def test_page_with_text(self):
+        page = pymupdf.open().new_page()
+        expected = PDFPageMetadata(page_number=0, lines=[], raw_text="Hello World")
+        with (
+            patch.object(PDFUtil, "get_clean_page_text", return_value="Hello World"),
+            patch.object(
+                PDFUtil,
+                "extract_page_metadata",
+                return_value=expected,
+            ) as mock_extract,
+        ):
+            page_metadata = PDFUtil.extract_page_content(page)
+
+        mock_extract.assert_called_once()
+        assert page_metadata.rendered_image is None
+        assert page_metadata.raw_text == "Hello World"
+
+    def test_page_without_text(self):
+        mock_pix = Mock()
+        mock_pix.width = 1240
+        mock_pix.height = 1754
+        mock_pix.samples = b"\x00" * (1240 * 1754 * 3)
+
+        page = pymupdf.open().new_page()
+        with (
+            patch.object(PDFUtil, "get_clean_page_text", return_value=""),
+            patch.object(
+                PDFUtil, "extract_page_metadata"
+            ) as mock_extract_page_metadata,
+            patch.object(pymupdf.Page, "get_pixmap", return_value=mock_pix),
+        ):
+            page_metadata = PDFUtil.extract_page_content(page)
+
+        mock_extract_page_metadata.assert_not_called()
+        assert page_metadata.raw_text == ""
+
+        rendered_image = page_metadata.rendered_image
+        assert rendered_image is not None
+        assert rendered_image.source_image_resolution == (1240, 1754)
+        assert rendered_image.page_number == page.number
+        # Transform maps normalised [0,1] coords to page points
+        page_rect = page.rect
+        assert rendered_image.image_transform_in_pdf[0] == pytest.approx(
+            page_rect.width
+        )
+        assert rendered_image.image_transform_in_pdf[3] == pytest.approx(
+            page_rect.height
+        )
 
 
 class TestCheckPartialRedactionAcrossLineBreaks:
