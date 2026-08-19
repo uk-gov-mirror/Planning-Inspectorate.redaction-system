@@ -102,6 +102,11 @@ class TestRedact(TestImageTextRedactor):
             if text in redaction_strings
         ]
         return {
+            "redaction_strings": tuple(
+                text
+                for text in redaction_strings
+                if any(text == t for t, _ in text_rect_map_for_image)
+            ),
             "text_rects_to_redact": text_rects_to_redact,
             "number_plate_detection_time": 0.01,
             "bbox_time": 0.01,

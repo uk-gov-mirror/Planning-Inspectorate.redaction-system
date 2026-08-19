@@ -37,19 +37,22 @@ class TestImageLLMTextRedactor(TestImageTextRedactorBase):
         images, text_rect_map, redaction_strings=None
     ):
         if redaction_strings is None:
-            redaction_strings = []
-        return [
-            {
-                "image": image,
-                "text_rect_map": map,
-                "text_content": " ".join(text for text, _ in map),
-                "text_chunks": [" ".join(text for text, _ in map)],
-                "redaction_strings": [
-                    text for text, _ in map if text in redaction_strings
-                ],
-            }
-            for image, map in zip(images, text_rect_map)
-        ]
+            redaction_strings = ()
+        return (
+            redaction_strings,
+            [
+                {
+                    "image": image,
+                    "text_rect_map": map,
+                    "text_content": " ".join(text for text, _ in map),
+                    "text_chunks": [" ".join(text for text, _ in map)],
+                    "redaction_strings": [
+                        text for text, _ in map if text in redaction_strings
+                    ],
+                }
+                for image, map in zip(images, text_rect_map)
+            ],
+        )
 
 
 class TestCreateRedactionResult(TestImageLLMTextRedactor):
@@ -62,11 +65,11 @@ class TestCreateRedactionResult(TestImageLLMTextRedactor):
             ),
         ]
         redaction_strings = ["Klingon"]
-        image_result = self._create_mock_analyse_image_text_result(
+        _, image_results = self._create_mock_analyse_image_text_result(
             [image], text_rect_map, redaction_strings=redaction_strings
         )
         actual_result, _ = ImageLLMTextRedactor._create_redaction_result(
-            image_result[0]
+            image_results[0]
         )
 
         assert actual_result.image_dimensions == (1000, 1000)
@@ -117,16 +120,16 @@ class TestAnalyseImageText(TestImageLLMTextRedactor):
         ):
             inst = ImageLLMTextRedactor()
             inst.config = config
-            result = inst._analyse_image_text(image_text_rect_map)
+            _, image_text_content = inst._analyse_image_text(image_text_rect_map)
 
         # LLM should be called once with the combined unique chunks
         mock_analyse_text.assert_called_once()
 
         # Image 0 contains "Klingon Romulan" so should get both strings
-        assert "Klingon" in result[0]["redaction_strings"]
-        assert "Romulan" in result[0]["redaction_strings"]
+        assert "Klingon" in image_text_content[0]["redaction_strings"]
+        assert "Romulan" in image_text_content[0]["redaction_strings"]
         # Image 1 contains "Vulcan" so should get that string
-        assert "Vulcan" in result[1]["redaction_strings"]
+        assert "Vulcan" in image_text_content[1]["redaction_strings"]
 
     def test_no_llm_analysis_with_empty_text_content(self):
         """
@@ -146,9 +149,12 @@ class TestAnalyseImageText(TestImageLLMTextRedactor):
         ):
             inst = ImageLLMTextRedactor()
             inst.config = config
-            result = inst._analyse_image_text(image_text_rect_map)
+            redaction_strings, image_text_content = inst._analyse_image_text(
+                image_text_rect_map
+            )
 
-        assert result is None
+        assert redaction_strings == ()
+        assert image_text_content == ()
         mock_llm_init.assert_not_called()
         mock_analyse_text.assert_not_called()
 
