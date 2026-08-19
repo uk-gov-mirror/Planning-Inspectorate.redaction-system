@@ -27,6 +27,33 @@ class ImageRedactionResult(RedactionResult):
         names: tuple[str] = field(default_factory=lambda: ())
         """The list of names associated with the redaction boxes"""
 
+        @classmethod
+        def from_image_analysis_results(
+            cls,
+            text_rects_to_redact: list[tuple[tuple[int, int, int, int], str]],
+            image_to_redact: Image,
+        ) -> "ImageRedactionResult":
+            """
+            Create an ImageRedactionResult from the given text rects to redact and the source image.
+
+            :param list[tuple[tuple[int, int, int, int], str]] text_rects_to_redact: A list of tuples containing the bounding box and the associated name to redact
+            :param Image image_to_redact: The source image
+
+            :return ImageRedactionResult: The resulting ImageRedactionResult object
+            """
+            text_rects_to_redact = list(dict.fromkeys(text_rects_to_redact))
+            if not text_rects_to_redact:
+                return None
+
+            redaction_boxes = tuple(rect for rect, _ in text_rects_to_redact)
+            names = tuple(name for _, name in text_rects_to_redact)
+            return cls(
+                image_dimensions=image_to_redact.size,
+                source_image=image_to_redact,
+                redaction_boxes=redaction_boxes,
+                names=names,
+            )
+
     redaction_results: tuple[Result]
     """A list of ImageRedactionResult.Result objects"""
 
