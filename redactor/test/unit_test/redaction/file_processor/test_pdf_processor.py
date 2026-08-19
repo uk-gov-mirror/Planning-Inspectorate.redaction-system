@@ -11,6 +11,7 @@ from PIL import Image
 from core.redaction.exceptions import NonEnglishContentException
 from core.redaction.file_processor import PDFProcessor
 from core.redaction.result import (
+    ImageLLMTextRedactionResult,
     ImageRedactionResult,
     TextRedactionResult,
 )
@@ -475,6 +476,90 @@ class TestApplyProvisionalTextRedactions(TestExamineApplyRedactionsBase):
 
         mock_examine_provisional_redactions_on_page.assert_not_called()
         mock_add_provisional_redaction.assert_not_called()
+
+
+class TestApplyRedactionRules:
+    def test_includes_redaction_strings_in_text_summary(self):
+        image = Image.new("RGB", (100, 100))
+
+        text_redactor_config = Mock()
+        text_redactor_config.redactor_type = "llm_text"
+        image_redactor_config = Mock()
+        image_redactor_config.redactor_type = "image_llm_text"
+        mock_redaction_rules = [text_redactor_config, image_redactor_config]
+
+        mock_text_redact = Mock(
+            redact=Mock(
+                return_value=TextRedactionResult(
+                    rule_name="TextRedactor1",
+                    run_metrics={"tokens_used": 10},
+                    redaction_strings=("Hello", "World"),
+                )
+            )
+        )
+        mock_image_llm_text_redact = Mock(
+            redact=Mock(
+                return_value=ImageLLMTextRedactionResult(
+                    rule_name="ImageRedactor1",
+                    run_metrics={"total_images_to_analyse": 1},
+                    redaction_results=(
+                        ImageRedactionResult.Result(
+                            image_dimensions=image.size,
+                            source_image=image,
+                            redaction_boxes=((0, 0, 100, 100),),
+                            names=("test_redaction",),
+                        ),
+                    ),
+                    redaction_strings=("test_redaction",),
+                )
+            )
+        )
+        redactor_factory_get_side_effect = [
+            lambda config, r=mock_text_redact: r,
+            lambda config, r=mock_image_llm_text_redact: r,
+        ]
+
+        with (
+            patch.object(PDFUtil, "extract_unique_pdf_images", return_value=[image]),
+            patch(
+                "core.redaction.file_processor.RedactorFactory.get",
+                side_effect=redactor_factory_get_side_effect,
+            ),
+        ):
+            processor = PDFProcessor()
+            processor.redaction_rules = mock_redaction_rules
+            processor.redaction_results = []
+            processor.run_metrics = {}
+            processor.pdf_text = (
+                "Hello World this is a test document with English text content"
+            )
+            processor.pdf_images = PDFImageMetadata(
+                source_image_resolution=(100, 100),
+                file_format="jpeg",
+                image=image,
+                page_number=0,
+                image_transform_in_pdf=(75.0, 0.0, -0.0, 75.0, 0.0, -0.0),
+            )
+            processor._text_redaction_summary = {}
+
+            processor._apply_redaction_rules()
+
+        mock_text_redact.redact.assert_called_once()
+        mock_image_llm_text_redact.redact.assert_called_once()
+
+        expected_text_redaction_summary = {
+            "TextRedactor1": {
+                "redaction_strings": ("Hello", "World"),
+                "n_proposed": 2,
+                "n_applied": 2,
+            },
+            "ImageRedactor1": {
+                "redaction_strings": ("test_redaction",),
+                "n_proposed": 1,
+                "n_applied": 1,
+            },
+        }
+        assert processor._text_redaction_summary == expected_text_redaction_summary
 
 
 class TestRedact:
