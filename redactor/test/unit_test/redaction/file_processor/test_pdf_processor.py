@@ -683,14 +683,14 @@ class TestApplyProvisionalImageRedactions:
         actual_annotated_rects = self._get_annotated_rects(redacted_doc_bytes)
 
         # Compare with expected redacted PDF with image highlights
-        with open(
-            "test/resources/pdf/test__pdf_processor__translated_image_PROVISIONAL.pdf",
-            "rb",
-        ) as f:
-            expected_provisional_redaction_bytes = BytesIO(f.read())
-        expected_annotation_rects = self._get_annotated_rects(
-            expected_provisional_redaction_bytes
-        )
+        expected_annotation_rects = [
+            pymupdf.Rect(
+                55.82174301147461,
+                83.3587646484375,
+                166.17825317382812,
+                167.7337646484375,
+            )
+        ]
 
         assert expected_annotation_rects == actual_annotated_rects
 
