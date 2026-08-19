@@ -329,3 +329,55 @@ class TestRedact(TestImageLLMTextRedactor):
             images, text_rect_map, redaction_strings=redaction_strings
         )
         self._compare_results(actual_results, expected_results)
+
+    def test_rendered_pdf_pages_analysed(self):
+        """
+        - Given I have no embedded images but rendered page images with pre-populated OCR
+        - When I call redact
+        - Then rendered images should be appended to the analysis pipeline and LLM should
+        identify redaction strings from the rendered text
+        """
+        from core.util.pdf_util import PDFImageMetadata
+
+        rendered_image = Image.new("RGB", (800, 600))
+        rendered_metadata = PDFImageMetadata(
+            source_image_resolution=(800, 600),
+            file_format="png",
+            image=rendered_image,
+            page_number=0,
+            image_transform_in_pdf=(0.48, 0.0, 0.0, 0.48, 0.0, 0.0),
+            text_rect_map=(
+                PDFImageMetadata.TextRectMapEntry(text="John", rect=(10, 10, 50, 30)),
+                PDFImageMetadata.TextRectMapEntry(text="Smith", rect=(55, 10, 100, 30)),
+            ),
+        )
+        text_rect_map = [
+            (
+                ("John", (10, 10, 50, 30)),
+                ("Smith", (55, 10, 100, 30)),
+            )
+        ]
+        r = self.patch_redactor_and_redact(
+            images=[],
+            text_rect_map=text_rect_map,
+            rendered_images=[rendered_metadata],
+            redaction_strings=["John", "Smith"],
+        )
+
+        # _analyse_images should not be called since OCR detection is pre-populated
+        r.analyse_images.assert_not_called()
+
+        # _analyse_image_text should be called with rendered image data
+        call_args = r.analyse_image_text.call_args[0][0]
+        assert len(call_args) == 1
+        assert call_args[0][0] == rendered_image
+        assert call_args[0][1] == (
+            ("John", (10, 10, 50, 30)),
+            ("Smith", (55, 10, 100, 30)),
+        )
+
+        assert "total_image_text_analysis_time" in r.result.run_metrics
+        assert len(r.result.redaction_results) == 1
+        assert r.result.redaction_results[0].source_image == rendered_image
+        assert (10, 10, 50, 30) in r.result.redaction_results[0].redaction_boxes
+        assert (55, 10, 100, 30) in r.result.redaction_results[0].redaction_boxes
