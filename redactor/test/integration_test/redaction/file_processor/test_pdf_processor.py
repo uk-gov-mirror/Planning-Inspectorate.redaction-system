@@ -27,6 +27,7 @@ PROPOSED_PDF_PATH = os.path.join(pdf_dir, "test__pdf_processor__proposed.pdf")
 SOURCE_IMAGE_PDF_PATH = os.path.join(pdf_dir, "test__pdf_processor__source_image.pdf")
 REDACTED_PDF_PATH = os.path.join(pdf_dir, "test__pdf_processor__redacted.pdf")
 SIGNATURE_PDF_PATH = os.path.join(pdf_dir, "test__pdf_processor__signature.pdf")
+PRINTED_PDF_PATH = os.path.join(pdf_dir, "test__pdf_processor__printed.pdf")
 
 
 def open_pdf_from_file(file_path: Path) -> BytesIO:
@@ -250,7 +251,7 @@ class TestExamineProvisionalRedactionsOnPage:
 
         instances_to_redact = pdf_processor._examine_provisional_redactions_on_page(
             [text for _, text in redaction_candidates],
-            PDFUtil.extract_page_text(pdf[0]),
+            PDFUtil.extract_page_metadata(pdf[0]),
         )
 
         assert_instances_to_redact_approx_equal(
@@ -380,6 +381,31 @@ class TestApplyProvisionalTextRedactions:
         assert "for some, savagely curtailing them for others" in actual_annotated_text
 
 
+class TestExtractPDFTextContent:
+    def test_pdf_with_text_returns_text_content(self):
+        document_bytes = open_pdf_from_file(SOURCE_PDF_PATH)
+        pdf_processor = PDFProcessor()
+        pdf_processor._extract_pdf_text_content(document_bytes)
+
+        page_metadata = pdf_processor.pages_metadata[0]
+        assert len(page_metadata.raw_text) > 0
+        assert len(page_metadata.lines) > 0
+        assert page_metadata.rendered_image is None
+
+    def test_pdf_without_text_returns_printed_text(self):
+        document_bytes = open_pdf_from_file(PRINTED_PDF_PATH)
+        pdf_processor = PDFProcessor()
+        pdf_processor._extract_pdf_text_content(document_bytes)
+
+        page_metadata = pdf_processor.pages_metadata[0]
+        assert len(page_metadata.raw_text) > 0
+        assert len(page_metadata.lines) == 0
+
+        rendered_image = page_metadata.rendered_image
+        assert rendered_image.image is not None
+        assert len(rendered_image.text_rect_map) > 0
+
+
 class TestRedact:
     def test_returns_annotated_pdf_bytes(self):
         """
@@ -462,7 +488,7 @@ class TestRedact:
 
         pdf_after = pymupdf.open(stream=redacted_file_bytes)
 
-        expected_annotation_rects = [
+        expected_annotation_rects = (
             Rect(
                 448.9051818847656,
                 131.69879150390625,
@@ -627,7 +653,7 @@ class TestRedact:
                 386.7773132324219,
                 145.06170654296875,
             ),
-        ]
+        )
 
         actual_annotation_rects = []
         for page in pdf_after:
@@ -717,6 +743,29 @@ class TestRedact:
             )
         ]
         assert actual_annotation_rects == expected_annotation_rects
+
+    def test_returns_annotated_printed_pdf_bytes(self):
+        file_bytes = open_pdf_from_file(PRINTED_PDF_PATH)
+        pdf_before = pymupdf.open(stream=file_bytes)
+        page_annotations_before = get_pdf_annotations(
+            pdf_before, pymupdf.PDF_ANNOT_HIGHLIGHT
+        )
+        assert not page_annotations_before
+
+        redacted_file_bytes = PDFProcessor().redact(
+            file_bytes, create_config(is_image=True)
+        )
+        pdf_after = pymupdf.open(stream=redacted_file_bytes)
+        actual_annotation_rects = []
+        for page in pdf_after:
+            actual_annotation_rects.extend(
+                [
+                    annotation.rect
+                    for annotation in page.annots(pymupdf.PDF_ANNOT_HIGHLIGHT)
+                ]
+            )
+
+        assert len(actual_annotation_rects) > 0
 
 
 class TestApply:
