@@ -61,6 +61,58 @@ class DetectNumberPlates:
         assert "AB12 CDE" in result
 
 
+@pytest.mark.parametrize(
+    "remaining_text_rect_map,expected_boxes",
+    [
+        (
+            [
+                ("word2", (210, 100, 300, 200)),  # Same line as previous word
+                ("word3", (310, 100, 400, 200)),
+            ],
+            [
+                (100, 100, 400, 200),
+            ],
+        ),
+        (
+            [
+                (
+                    "word2",
+                    (210, 110, 300, 210),
+                ),  # Same line as previous word, but slightly lower
+                ("word3", (310, 120, 400, 220)),  # Different line from previous word
+            ],
+            [(100, 100, 300, 210), (310, 120, 400, 220)],
+        ),
+        (
+            [
+                ("word2", (210, 300, 300, 400)),  # Different line from previous word
+                ("word3", (310, 500, 400, 600)),
+            ],
+            [
+                (100, 100, 200, 200),
+                (210, 300, 300, 400),
+                (310, 500, 400, 600),
+            ],
+        ),
+        (
+            [
+                ("word4", (210, 300, 300, 400)),  # No match
+                ("word5", (310, 500, 400, 600)),
+            ],
+            None,
+        ),
+    ],
+)
+def test_check_subsequent_words(remaining_text_rect_map, expected_boxes):
+    bounding_box = (100, 100, 200, 200)
+    text_rect_map = [bounding_box] + remaining_text_rect_map
+    words_to_redact = ["word1", "word2", "word3"]
+    result = ImageTextRedactor._check_subsequent_words(
+        0, text_rect_map, words_to_redact, bounding_box, margin=10
+    )
+    assert result == expected_boxes
+
+
 def test_examine_redaction_boxes():
     """
     - Given I have some text rectangle map and a redaction string
