@@ -352,6 +352,79 @@ class ImageTextRedactor(ImageRedactor, TextRedactor):
             )
         )
 
+    @staticmethod
+    def _check_subsequent_words(
+        index: int,
+        text_rect_map: list[tuple[str, tuple[int, int, int, int]]],
+        words_to_redact: list[str],
+        bounding_box: tuple[int, int, int, int],
+        margin: int = 5,
+    ) -> list[tuple[int, int, int, int]] | None:
+        """
+        Check if the subsequent words in the text_rect_map match the words_to_redact.
+        If they do, return the bounding boxes for the matched words. If not, return None.
+
+        :param int index: The index of the first word in the text_rect_map that matched
+        :param list[tuple[str, tuple[int, int, int, int]]] text_rect_map: A list of
+        tuples of the form (text_at_box, bounding_box)
+        :param list[str] words_to_redact: A list of words to redact
+        :param tuple[int, int, int, int] bounding_box: The bounding box of the first word
+        :param int margin: A margin to allow for slight misalignment of words on the same line
+
+        :return list[tuple[int, int, int, int]] | None: A list of bounding boxes for
+        the matched words, or None if not all words matched
+        """
+        # Check subsequent words
+        boxes = []
+        line_bbox = {
+            "x0": bounding_box[0],
+            "y0": bounding_box[1],
+            "x1": bounding_box[2],
+            "y1": bounding_box[3],
+        }
+
+        while index + 1 < len(text_rect_map) and words_to_redact:
+            # Get next word to redact
+            word = words_to_redact.pop(0)
+            next_text, next_bounding_box = text_rect_map[index + 1]
+
+            text_normalised_words = get_normalised_words(next_text)
+            if text_normalised_words:
+                text_normalised = text_normalised_words[0]
+                if word == text_normalised:
+                    # Check if the next word is on the same line as the previous word
+                    x0, y0, x1, y1 = next_bounding_box
+                    if (
+                        y0 <= line_bbox["y0"] + margin
+                        and y1 >= line_bbox["y1"] - margin
+                    ):
+                        line_bbox.update(
+                            {
+                                "y0": min(line_bbox["y0"], y0),
+                                "x1": max(line_bbox["x1"], x1),
+                                "y1": max(line_bbox["y1"], y1),
+                            }
+                        )
+                    else:
+                        # Record previous line
+                        boxes.append(tuple(line_bbox.values()))
+                        # Start a new line bbox
+                        line_bbox.update(
+                            {
+                                "x0": x0,
+                                "y0": y0,
+                                "x1": x1,
+                                "y1": y1,
+                            }
+                        )
+                    if not words_to_redact:  # All words matched
+                        boxes.append(tuple(line_bbox.values()))
+                        return boxes
+                    index += 1
+                else:
+                    continue
+        return None
+
     @classmethod
     def examine_redaction_boxes(
         cls,
@@ -388,23 +461,12 @@ class ImageTextRedactor(ImageRedactor, TextRedactor):
                 # Proceed only if the first word matches
                 normalised_words = get_normalised_words(text_at_box)
                 if normalised_words and first_word == normalised_words[0]:
-                    boxes = [bounding_box]
-                    i_copy = i
                     # Check subsequent words
-                    while i_copy + 1 < len(text_rect_map) and words_to_redact_copy:
-                        word = words_to_redact_copy.pop(0)
-                        next_text, next_bounding_box = text_rect_map[i_copy + 1]
-                        text_normalised_words = get_normalised_words(next_text)
-                        if text_normalised_words:
-                            text_normalised = text_normalised_words[0]
-                            if word == text_normalised:
-                                boxes.append(next_bounding_box)
-                                if not words_to_redact_copy:
-                                    # All words matched
-                                    text_rects_to_redact.extend(boxes)
-                                i_copy += 1
-                            else:
-                                continue
+                    bounding_boxes = cls._check_subsequent_words(
+                        i, text_rect_map, words_to_redact_copy, bounding_box
+                    )
+                    if bounding_boxes:
+                        text_rects_to_redact.extend(bounding_boxes)
 
         return text_rects_to_redact
 
