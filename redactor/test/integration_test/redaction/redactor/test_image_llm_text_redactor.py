@@ -132,8 +132,9 @@ class TestAnalyseImageText:
 
         inst = ImageLLMTextRedactor(config)
 
-        result = inst._analyse_image_text(image_text_rect_map)
+        redaction_strings, result = inst._analyse_image_text(image_text_rect_map)
 
+        assert redaction_strings is not None
         assert result is not None
         assert len(result) == 2
 
@@ -168,6 +169,7 @@ class TestAnalyseImageText:
         ]
 
         inst = ImageLLMTextRedactor(config)
-        result = inst._analyse_image_text(image_text_rect_map)
+        redaction_strings, result = inst._analyse_image_text(image_text_rect_map)
 
-        assert result is None
+        assert redaction_strings == ()
+        assert result == ()
