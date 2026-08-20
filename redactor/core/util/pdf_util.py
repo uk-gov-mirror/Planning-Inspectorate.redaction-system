@@ -175,36 +175,44 @@ class PDFUtil:
             .strip()
         )
 
+    @staticmethod
+    def _render_pdf_page_to_image(
+        page: pymupdf.Page, render_dpi: int = 150
+    ) -> PDFImageMetadata:
+        pix = page.get_pixmap(dpi=render_dpi)
+        image = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+        # transform_bounding_box_to_global_space normalises by image dims first,
+        # so the matrix must map [0,1] → page points
+        page_rect = page.rect
+        return PDFImageMetadata(
+            source_image_resolution=(pix.width, pix.height),
+            file_format="png",
+            image=image,
+            page_number=page.number,
+            image_transform_in_pdf=(
+                page_rect.width,
+                0.0,
+                0.0,
+                page_rect.height,
+                0.0,
+                0.0,
+            ),
+        )
+
     @classmethod
     def extract_page_content(cls, page: pymupdf.Page) -> PDFPageMetadata:
         page_text = cls.get_clean_page_text(page)
+        rendered_image = cls._render_pdf_page_to_image(page)
         if page_text == "":
-            render_dpi = 150
-            pix = page.get_pixmap(dpi=render_dpi)
-            image = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
-            # transform_bounding_box_to_global_space normalises by image dims first,
-            # so the matrix must map [0,1] → page points
-            page_rect = page.rect
             return PDFPageMetadata(
                 page_number=page.number,
                 lines=[],
                 raw_text=page_text,
-                rendered_image=PDFImageMetadata(
-                    source_image_resolution=(pix.width, pix.height),
-                    file_format="png",
-                    image=image,
-                    page_number=page.number,
-                    image_transform_in_pdf=(
-                        page_rect.width,
-                        0.0,
-                        0.0,
-                        page_rect.height,
-                        0.0,
-                        0.0,
-                    ),
-                ),
+                rendered_image=rendered_image,
             )
-        return cls.extract_page_metadata(page, raw_text=page_text)
+        page_metadata = cls.extract_page_metadata(page, raw_text=page_text)
+        page_metadata.rendered_image = rendered_image
+        return page_metadata
 
     @classmethod
     def extract_pdf_text(cls, file_bytes: BytesIO) -> str:

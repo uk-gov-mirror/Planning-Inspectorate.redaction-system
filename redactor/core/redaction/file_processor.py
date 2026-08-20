@@ -564,24 +564,27 @@ class PDFProcessor(FileProcessor):
             self.pages_metadata.append(page_metadata)
 
         # Apply OCR to pages with no text content
-        pages_rendered = [
-            page for page in self.pages_metadata if page.rendered_image is not None
+        pages_without_text = [
+            page for page in self.pages_metadata if page.raw_text == ""
         ]
-        if pages_rendered:
+        if pages_without_text:
             LoggingUtil().log_info(
-                f"{len(pages_rendered)} pages have no text content, applying OCR "
+                f"{len(pages_without_text)} pages have no text content, applying OCR "
                 f"to extract text from PDF image."
             )
             with TimerUtil() as timer:
                 ocr_results = AzureVisionUtil.detect_text_in_images(
-                    [page.rendered_image.image for page in pages_rendered]
+                    [page.rendered_image.image for page in pages_without_text]
                 )
             self.run_metrics["rendered_page_ocr_time"] = timer.elapsed_time
+
             for ocr_result in ocr_results:
                 image, text_rect_entries = ocr_result
+
+                # Find the page that corresponds to the image returned by Azure Vision
                 page = next(
                     page
-                    for page in pages_rendered
+                    for page in pages_without_text
                     if page.rendered_image.image == image
                 )
                 if text_rect_entries:
@@ -679,36 +682,42 @@ class PDFProcessor(FileProcessor):
         # Generate list of redaction rules from config
         unique_pdf_images = PDFUtil.extract_unique_pdf_images(self.pdf_images)
 
+        pages_rendered = [
+            page
+            for page in self.pages_metadata
+            if page.rendered_image and page.rendered_image.text_rect_map
+        ]
+        image_text_analysis_pages = (
+            [page.rendered_image.image for page in pages_rendered]
+            if pages_rendered
+            else None
+        )
+        images_for_text_analysis = PDFUtil.extract_unique_pdf_images(
+            [
+                image
+                for image in self.pdf_images
+                if image.page_number
+                not in [page.page_number for page in pages_rendered]
+            ]
+        )
         # Attach text and images to redaction configs
         for rule in self.redaction_rules:
             if hasattr(rule, "text") and hasattr(rule, "images"):
                 # Analyse rendered printed pages with text only
-                pages_rendered = [
-                    page
-                    for page in self.pages_metadata
-                    if page.rendered_image and page.rendered_image.text_rect_map
-                ]
                 rule.text = self.rendered_pdf_text if self.rendered_pdf_text else None
-                rule.rendered_images = (
-                    [page.rendered_image for page in pages_rendered]
-                    if pages_rendered
-                    else None
-                )
+                rule.rendered_images = image_text_analysis_pages
                 if pages_rendered:
                     # Only include images that are not included in the rendered pages
-                    images_to_analyse = [
-                        image
-                        for image in self.pdf_images
-                        if image.page_number
-                        not in [page.page_number for page in pages_rendered]
-                    ]
-                    rule.images = PDFUtil.extract_unique_pdf_images(images_to_analyse)
+                    rule.images = images_for_text_analysis
                 else:
                     rule.images = unique_pdf_images
             elif hasattr(rule, "text"):
                 rule.text = self.pdf_text
             elif hasattr(rule, "images"):
-                rule.images = unique_pdf_images
+                # Analyse entire PDF page
+                rule.images = tuple(
+                    page.rendered_image.image for page in self.pages_metadata
+                )
 
         # Generate list of rules to apply
         redaction_rules_to_apply: list[Redactor] = [
