@@ -65,24 +65,23 @@ def import_all_testing_modules():
     # Extract all testing modules under the `test/` directory
     module_content_to_exclude = {"__init__.py", "__pycache__", "conftest.py"}
     python_modules_to_load = []
+    test_dir = os.path.dirname(__file__)
     files_to_explore = [
         x
-        for x in os.listdir(os.path.join("test"))
-        if "test" in x and os.path.isdir(os.path.join("test", x))
+        for x in os.listdir(test_dir)
+        if "test" in x and os.path.isdir(os.path.join(test_dir, x))
     ]
     while files_to_explore:
-        next_file = files_to_explore.pop(0)
-        if os.path.isfile(os.path.join("test", next_file)):
-            if next_file.endswith(".py") and all(
-                x not in next_file for x in module_content_to_exclude
+        file = files_to_explore.pop(0)
+        current_path = os.path.join(test_dir, file)
+        if os.path.isfile(current_path):
+            if file.endswith(".py") and all(
+                x not in file for x in module_content_to_exclude
             ):
-                python_modules_to_load.append(next_file)
+                python_modules_to_load.append(file)
         else:
             files_to_explore.extend(
-                [
-                    os.path.join(next_file, x)
-                    for x in os.listdir(os.path.join("test", next_file))
-                ]
+                [os.path.join(current_path, x) for x in os.listdir(current_path)]
             )
     python_modules_to_load_cleaned = sorted(
         [x.replace(".py", "").replace(os.sep, ".") for x in python_modules_to_load]
@@ -93,7 +92,7 @@ def import_all_testing_modules():
     ]
     # Import all testing modules
     for module_to_import in python_modules_to_load_cleaned:
-        importlib.import_module(module_to_import)
+        importlib.import_module(module_to_import, package="test")
     return python_modules_to_load_cleaned
 
 
