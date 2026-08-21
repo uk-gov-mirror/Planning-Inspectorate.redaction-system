@@ -20,24 +20,13 @@ from test.util.util import (
     assert_rect_approx_equal,
 )
 
-SOURCE_PDF_PATH = os.path.join(
-    "test", "resources", "pdf", "test__pdf_processor__source.pdf"
-)
-PROPOSED_PDF_PATH = os.path.join(
-    "test", "resources", "pdf", "test__pdf_processor__proposed.pdf"
-)
-PROVISIONAL_PDF_PATH = os.path.join(
-    "test", "resources", "pdf", "test__pdf_processor__provisional_redactions.pdf"
-)
-SOURCE_IMAGE_PDF_PATH = os.path.join(
-    "test", "resources", "pdf", "test__pdf_processor__source_image.pdf"
-)
-REDACTED_PDF_PATH = os.path.join(
-    "test", "resources", "pdf", "test__pdf_processor__redacted.pdf"
-)
-SIGNATURE_PDF_PATH = os.path.join(
-    "test", "resources", "pdf", "test__pdf_processor__signature.pdf"
-)
+pdf_dir = os.path.join("test", "resources", "pdf")
+
+SOURCE_PDF_PATH = os.path.join(pdf_dir, "test__pdf_processor__source.pdf")
+PROPOSED_PDF_PATH = os.path.join(pdf_dir, "test__pdf_processor__proposed.pdf")
+SOURCE_IMAGE_PDF_PATH = os.path.join(pdf_dir, "test__pdf_processor__source_image.pdf")
+REDACTED_PDF_PATH = os.path.join(pdf_dir, "test__pdf_processor__redacted.pdf")
+SIGNATURE_PDF_PATH = os.path.join(pdf_dir, "test__pdf_processor__signature.pdf")
 
 
 def open_pdf_from_file(file_path: Path) -> BytesIO:
@@ -725,7 +714,7 @@ class TestApply:
         - Then the final redacted output should have the same content as our sample fully-redacted pdf
         """
         # Run the redaction process against the provisional redaction file
-        provisional_redaction_file_bytes = open_pdf_from_file(PROVISIONAL_PDF_PATH)
+        provisional_redaction_file_bytes = open_pdf_from_file(PROPOSED_PDF_PATH)
         provisional_redactions = get_pdf_annotations(
             pymupdf.open(stream=provisional_redaction_file_bytes),
             pymupdf.PDF_ANNOT_HIGHLIGHT,
