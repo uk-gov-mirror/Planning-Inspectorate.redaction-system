@@ -141,6 +141,15 @@ class PDFProcessor(FileProcessor):
     Class for managing the redaction of PDF documents
     """
 
+    def __init__(self):
+        super().__init__()
+        self.pdf_text: str | None = None
+        self.rendered_pdf_text: str | None = None
+        self.pdf_images: list[PDFImageMetadata] = []
+        self.pages_metadata: list[PDFPageMetadata] = []
+        self.redaction_rules: list[RedactionConfig] = []
+        self.redaction_results: list[RedactionResult] = []
+
     @classmethod
     def get_name(cls) -> str:
         return "pdf"
@@ -558,7 +567,6 @@ class PDFProcessor(FileProcessor):
         text extraction.
         """
         pdf = pymupdf.open(stream=file_bytes)
-        self.pages_metadata: list[PDFPageMetadata] = []
         for page in pdf:
             page_metadata = PDFUtil.extract_page_content(page)
             self.pages_metadata.append(page_metadata)
@@ -616,9 +624,7 @@ class PDFProcessor(FileProcessor):
                 for page in self.pages_metadata
                 if page.rendered_image is None
             ]
-            if all(text == "" for text in pages_text):
-                self.pdf_text = None
-            else:
+            if not all(text == "" for text in pages_text):
                 self.pdf_text = "\n".join(pages_text)
 
             rendered_page_text = [
@@ -808,8 +814,6 @@ class PDFProcessor(FileProcessor):
         self.redaction_rules: list[RedactionConfig] = redaction_config.get(
             "redaction_rules", []
         )
-        self.redaction_results: list[RedactionResult] = []
-
         self._extract_pdf_text_and_images(file_bytes)
 
         # Generate redactions
