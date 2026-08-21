@@ -31,6 +31,13 @@ def _mock_init():
         self.run_metrics = {}
         self.terms_found = {}
 
+        self.pdf_text = None
+        self.rendered_pdf_text = None
+        self.pdf_images = []
+        self.pages_metadata = []
+        self.redaction_rules = []
+        self.redaction_results = []
+
     with patch.object(PDFProcessor, "__init__", init_side_effect):
         yield
 
@@ -365,6 +372,13 @@ class TestExamineApplyRedactionsBase:
             page_number=page_number,
             lines=line_metadata,
             raw_text=text_content if text_content else "",
+            rendered_image=PDFImageMetadata(
+                source_image_resolution=(100, 100),
+                file_format="jpg",
+                page_number=page_number,
+                image=Image.new("RGB", (100, 100)),
+                image_transform_in_pdf=(1.0, 0.0, 0.0, 1.0, 0.0, 0.0),
+            ),
         )
 
 
@@ -479,7 +493,7 @@ class TestApplyProvisionalTextRedactions(TestExamineApplyRedactionsBase):
         mock_add_provisional_redaction.assert_not_called()
 
 
-class TestApplyRedactionRules:
+class TestApplyRedactionRules(TestExamineApplyRedactionsBase):
     def test_includes_redaction_strings_in_text_summary(self):
         image = Image.new("RGB", (100, 100))
 
@@ -488,6 +502,8 @@ class TestApplyRedactionRules:
         image_redactor_config = Mock()
         image_redactor_config.redactor_type = "image_llm_text"
         mock_redaction_rules = [text_redactor_config, image_redactor_config]
+
+        page_text = "Hello World this is a test document with English text content"
 
         mock_text_redact = Mock(
             redact=Mock(
@@ -529,18 +545,27 @@ class TestApplyRedactionRules:
         ):
             processor = PDFProcessor()
             processor.redaction_rules = mock_redaction_rules
-            processor.redaction_results = []
-            processor.run_metrics = {}
-            processor.pdf_text = (
-                "Hello World this is a test document with English text content"
-            )
-            processor.pdf_images = PDFImageMetadata(
-                source_image_resolution=(100, 100),
-                file_format="jpeg",
-                image=image,
-                page_number=0,
-                image_transform_in_pdf=(75.0, 0.0, -0.0, 75.0, 0.0, -0.0),
-            )
+            processor.pages_metadata = [
+                self.create_mock_page_metadata(
+                    page_number=0,
+                    text_content=page_text,
+                    lines=[page_text],
+                    y0=[0],
+                    x0=[[10 * i for i in range(len(page_text.split()))]],
+                    y1=[10],
+                    x1=[[10 * (i + 1) for i in range(len(page_text.split()))]],
+                )
+            ]
+            processor.pdf_text = page_text
+            processor.pdf_images = [
+                PDFImageMetadata(
+                    source_image_resolution=(100, 100),
+                    file_format="jpeg",
+                    image=image,
+                    page_number=0,
+                    image_transform_in_pdf=(75.0, 0.0, -0.0, 75.0, 0.0, -0.0),
+                )
+            ]
             processor._text_redaction_summary = {}
 
             processor._apply_redaction_rules()
@@ -561,6 +586,8 @@ class TestApplyRedactionRules:
             },
         }
         assert processor._text_redaction_summary == expected_text_redaction_summary
+
+
 class TestExtractPDFTextContent(TestExamineApplyRedactionsBase):
     def test_pdf_with_text_returns_text_content(self):
         text_on_page = "Hello World"
@@ -595,7 +622,6 @@ class TestExtractPDFTextContent(TestExamineApplyRedactionsBase):
 
         actual_page_metadata = result_metadata[0]
         assert actual_page_metadata == page_metadata
-        assert actual_page_metadata.rendered_image is None
 
     def test_pdf_without_text_returns_printed_text(self):
         doc = pymupdf.open()
@@ -704,7 +730,6 @@ class TestExtractPDFTextAndImages(TestExamineApplyRedactionsBase):
 
         actual_page_metadata = result_metadata[0]
         assert actual_page_metadata == page_metadata
-        assert actual_page_metadata.rendered_image is None
 
         result_images = pdf_processor.pdf_images
         assert len(result_images) == 1
