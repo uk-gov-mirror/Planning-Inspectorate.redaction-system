@@ -90,11 +90,14 @@ def test__update_max_tokens__limit():
 
 
 def test__llm_text_analyser____init__():
-    llm_text_analyser_config = LLMTextAnalyserConfig(
-        model="gpt-5.6-luna",
-        token_rate_limit=2000,
-    )
-    llm_text_analyser = LLMTextAnalyser(llm_text_analyser_config)
+    mock_token = Mock()
+    mock_token.token = "mock_token"
+    with patch(f"{MODULE}.ChainedTokenCredential.get_token", return_value=mock_token):
+        llm_text_analyser_config = LLMTextAnalyserConfig(
+            model="gpt-5.6-luna",
+            token_rate_limit=2000,
+        )
+        llm_text_analyser = LLMTextAnalyser(llm_text_analyser_config)
 
     assert llm_text_analyser.config.token_rate_limit == 2000
     assert llm_text_analyser.config.token_encoding_name == "o200k_base"
