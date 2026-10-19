@@ -50,7 +50,7 @@ def test__llm_text_redactor___analyse_text(mock_llm_text_redaction_config_init):
         metadata=LLMTextRedactionResult.LLMResultMetadata(
             request_count=0,
             input_token_count=0,
-            output_token_count=0,
+            completion_token_count=0,
             total_token_count=0,
             total_cost=0,
         ),

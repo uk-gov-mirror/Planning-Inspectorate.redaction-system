@@ -102,8 +102,8 @@ def test__llm_text_analyser____init__():
     assert llm_text_analyser.config.token_rate_limit == 2000
     assert llm_text_analyser.config.token_encoding_name == "o200k_base"
 
-    assert llm_text_analyser.input_token_cost == 149 * 0.000001
-    assert llm_text_analyser.output_token_cost == 593 * 0.000001
+    assert llm_text_analyser.input_token_cost == pytest.approx(16 * 1e-8)
+    assert llm_text_analyser.completion_token_cost == pytest.approx(91 * 1e-8)
 
 
 @patch.object(LLMTextAnalyser, "__init__", return_value=None)
@@ -120,8 +120,8 @@ def test__llm_text_analyser___set_model_details(mock_llm_text_analyser_init):
     assert llm_text_analyser.config.token_rate_limit == TOKEN_RATE_LIMIT / 10
     assert llm_text_analyser.config.request_rate_limit == REQUEST_RATE_LIMIT / 10
 
-    assert llm_text_analyser.input_token_cost == 149 * 0.000001
-    assert llm_text_analyser.output_token_cost == 593 * 0.000001
+    assert llm_text_analyser.input_token_cost == pytest.approx(16 * 1e-8)
+    assert llm_text_analyser.completion_token_cost == pytest.approx(91 * 1e-8)
 
 
 @patch.object(LLMTextAnalyser, "__init__", return_value=None)
@@ -312,7 +312,7 @@ def test__llm_text_analyser___compute_costs():
     )
     llm_text_analyser = LLMTextAnalyser(llm_text_analyser_config)
     llm_text_analyser.input_token_cost = 1
-    llm_text_analyser.output_token_cost = 2
+    llm_text_analyser.completion_token_cost = 2
 
     mock_chat_completion = create_mock_chat_completion(
         prompt_tokens=10, completion_tokens=15
@@ -321,8 +321,28 @@ def test__llm_text_analyser___compute_costs():
     llm_text_analyser._compute_costs(mock_chat_completion.usage)
 
     assert llm_text_analyser.input_token_count == 10
-    assert llm_text_analyser.output_token_count == 15
+    assert llm_text_analyser.completion_token_count == 15
     assert llm_text_analyser.total_cost == 40
+
+
+def test__llm_text_analyser___compute_costs__cached_and_reasoning_tokens():
+    """
+    - Given an LLM usage object that includes cached input and reasoning token details
+    - When I call _compute_costs
+    - Then the cached and reasoning token counts should be accumulated
+    """
+    llm_text_analyser = LLMTextAnalyser(LLMTextAnalyserConfig(model="gpt-5.6-luna"))
+    llm_text_analyser.input_token_cost = 1
+    llm_text_analyser.completion_token_cost = 2
+    usage = MockLLMChatCompletionUsage(prompt_tokens=10, completion_tokens=15)
+    usage.prompt_tokens_details = Mock(cached_tokens=6, cache_write_tokens=0)
+    usage.completion_tokens_details = Mock(reasoning_tokens=9)
+
+    llm_text_analyser._compute_costs(usage)
+    llm_text_analyser._compute_costs(usage)
+
+    assert llm_text_analyser.cached_input_token_count == 12
+    assert llm_text_analyser.reasoning_token_count == 18
 
 
 @patch.object(
@@ -345,7 +365,7 @@ def test__llm_text_analyser___analyse_text_chunk(
     llm_text_analyser.request_semaphore = Mock()
     llm_text_analyser.token_semaphore = Mock()
     llm_text_analyser.input_token_cost = 1
-    llm_text_analyser.output_token_cost = 2
+    llm_text_analyser.completion_token_cost = 2
 
     with patch.object(
         LLMTextAnalyser, "invoke_chain", return_value=mock_chat_completion
@@ -357,7 +377,7 @@ def test__llm_text_analyser___analyse_text_chunk(
     assert expected_result == actual_result
 
     assert llm_text_analyser.input_token_count == 5
-    assert llm_text_analyser.output_token_count == 4
+    assert llm_text_analyser.completion_token_count == 4
     assert llm_text_analyser.total_cost == 13
 
     llm_text_analyser.request_semaphore.acquire.assert_called_once()
@@ -535,7 +555,7 @@ def test__llm_text_analyser__analyse_text():
     llm_text_analyser.request_semaphore = Mock()
     llm_text_analyser.token_semaphore = Mock()
     llm_text_analyser.input_token_cost = 1
-    llm_text_analyser.output_token_cost = 2
+    llm_text_analyser.completion_token_cost = 2
 
     results = [
         (create_mock_chat_completion(["string A"]), ["string A"]),
@@ -560,7 +580,7 @@ def test__llm_text_analyser__analyse_text():
     assert actual_result.metadata == LLMTextRedactionResult.LLMResultMetadata(
         request_count=2,
         input_token_count=10,
-        output_token_count=8,
+        completion_token_count=8,
         total_token_count=18,
         total_cost=26.0,
     )
@@ -569,7 +589,7 @@ def test__llm_text_analyser__analyse_text():
     assert set(actual_result.redaction_strings) == {"string A", "string B"}
 
     assert llm_text_analyser.input_token_count == 10
-    assert llm_text_analyser.output_token_count == 8
+    assert llm_text_analyser.completion_token_count == 8
     assert llm_text_analyser.total_cost == 26.0
 
 
@@ -649,7 +669,7 @@ def test__llm_text_analyser__analyse_text__budget_exceeded(
     )
     llm_text_analyser = LLMTextAnalyser(llm_text_analyser_config)
     llm_text_analyser.input_token_cost = 1
-    llm_text_analyser.output_token_cost = 2
+    llm_text_analyser.completion_token_cost = 2
 
     with patch.object(LLMTextAnalyser, "invoke_chain") as mock_invoke_chain:
         mock_invoke_chain.side_effect = [
@@ -713,7 +733,7 @@ def test__llm_text_analyser__analyse_text__single_chunk_sequential(mock_get_enco
     llm_text_analyser.request_semaphore = Mock()
     llm_text_analyser.token_semaphore = Mock()
     llm_text_analyser.input_token_cost = 1
-    llm_text_analyser.output_token_cost = 2
+    llm_text_analyser.completion_token_cost = 2
 
     with (
         patch.object(LLMTextAnalyser, "invoke_chain") as mock_invoke_chain,
@@ -732,6 +752,63 @@ def test__llm_text_analyser__analyse_text__single_chunk_sequential(mock_get_enco
 
     assert actual_result.redaction_strings == ("string A",)
     assert actual_result.metadata.request_count == 1
+
+
+@patch(f"{MODULE}.get_encoding")
+def test__llm_text_analyser__analyse_text__sequential_failed_chunk_counted(
+    mock_get_encoding,
+):
+    """
+    - Given a chunk whose analysis returns no result after all retries
+    - When analyse_text processes chunks sequentially
+    - Then processing should continue and the failure should be counted in metadata
+    """
+    llm_text_analyser = LLMTextAnalyser(
+        LLMTextAnalyserConfig(model="gpt-5.6-luna", max_concurrent_requests=1)
+    )
+
+    with patch.object(
+        LLMTextAnalyser,
+        "_analyse_text_chunk",
+        side_effect=[None, (create_mock_chat_completion(["string B"]), ["string B"])],
+    ):
+        actual_result = llm_text_analyser.analyse_text(
+            system_prompt="system prompt",
+            text_chunks=["chunk A", "chunk B"],
+        )
+
+    assert actual_result.redaction_strings == ("string B",)
+    assert actual_result.metadata.request_count == 2
+    assert actual_result.metadata.failed_chunk_count == 1
+
+
+@patch.object(LLMTextAnalyser, "analyse_text", LLMTextAnalyser.analyse_text.__wrapped__)
+def test__llm_text_analyser__analyse_text__parallel_failed_chunk_counted():
+    """
+    - Given a chunk whose analysis returns no result after all retries
+    - When analyse_text processes chunks in parallel
+    - Then the failure should be counted in metadata
+    """
+    llm_text_analyser = LLMTextAnalyser(
+        LLMTextAnalyserConfig(model="gpt-5.6-luna", max_concurrent_requests=4)
+    )
+    results = {
+        "chunk A": None,
+        "chunk B": (create_mock_chat_completion(["string B"]), ["string B"]),
+    }
+
+    with patch.object(
+        LLMTextAnalyser,
+        "_analyse_text_chunk",
+        side_effect=lambda system_prompt, user_prompt: results[user_prompt],
+    ):
+        actual_result = llm_text_analyser.analyse_text(
+            system_prompt="system prompt",
+            text_chunks=["chunk A", "chunk B"],
+        )
+
+    assert actual_result.redaction_strings == ("string B",)
+    assert actual_result.metadata.failed_chunk_count == 1
 
 
 @patch.object(LLMTextAnalyser, "analyse_text", LLMTextAnalyser.analyse_text.__wrapped__)
@@ -777,7 +854,7 @@ def test__llm_text_analyser__analyse_text__sequential_budget_exceeded(
     )
     llm_text_analyser = LLMTextAnalyser(llm_text_analyser_config)
     llm_text_analyser.input_token_cost = 1
-    llm_text_analyser.output_token_cost = 2
+    llm_text_analyser.completion_token_cost = 2
 
     with patch.object(LLMTextAnalyser, "invoke_chain") as mock_invoke_chain:
         mock_invoke_chain.side_effect = [

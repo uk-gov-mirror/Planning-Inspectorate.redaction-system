@@ -109,7 +109,7 @@ class TestAnalyseImageText(TestImageLLMTextRedactor):
             run_metrics={},
             redaction_strings=("Klingon", "Romulan", "Vulcan"),
             metadata=LLMTextRedactionResult.LLMResultMetadata(
-                input_token_count=80, output_token_count=20, total_token_count=100
+                input_token_count=80, completion_token_count=20, total_token_count=100
             ),
         )
         with (
