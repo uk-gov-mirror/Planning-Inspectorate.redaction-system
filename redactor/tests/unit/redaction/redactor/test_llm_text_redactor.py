@@ -68,7 +68,44 @@ def test__llm_text_redactor___analyse_text(mock_llm_text_redaction_config_init):
         LLMTextRedactor()._analyse_text("some text to analyse")
 
     mock_llm_text_analyser_init.assert_called_once_with(config)
-    mock_analyse_text.assert_called_once()
+    mock_analyse_text.assert_called_once_with(
+        config.create_system_prompt(), ["some text to analyse"]
+    )
+
+
+@patch.object(LLMTextRedactor, "__init__", return_value=None)
+def test__llm_text_redactor___analyse_text__uses_config_chunk_size(
+    mock_llm_text_redaction_config_init,
+):
+    """
+    - Given I have llm redaction config with a small chunk size
+    - When I call LLMTextRedactor._analyse_text with text longer than one chunk
+    - Then the text should be split into multiple chunks before analysis
+    """
+    config = LLMTextRedactionConfig(
+        name="config name",
+        redactor_type="LLMTextRedaction",
+        model="gpt-5.6-luna",
+        system_prompt="some system prompt",
+        redaction_terms=["rule A"],
+        chunk_size=20,
+        chunk_overlap=0,
+    )
+    mock_llm_result = LLMTextRedactionResult(
+        rule_name="", run_metrics={}, redaction_strings=[]
+    )
+
+    with (
+        patch.object(LLMTextAnalyser, "__init__", return_value=None),
+        patch.object(
+            LLMTextAnalyser, "analyse_text", return_value=mock_llm_result
+        ) as mock_analyse_text,
+    ):
+        LLMTextRedactor.config = config
+        LLMTextRedactor()._analyse_text(" ".join(f"word{i}" for i in range(200)))
+
+    text_chunks = mock_analyse_text.call_args.args[1]
+    assert len(text_chunks) > 1
 
 
 @patch.object(LLMTextRedactor, "__init__", return_value=None)

@@ -99,6 +99,9 @@ For `LLMTextRedaction` rules, each rule has:
 - `system_prompt` — the instruction given to the LLM (e.g. "extract all requested terms")
 - `redaction_terms` — the categories of information to find (e.g. "People's names")
 - `constraints` — things to explicitly exclude (e.g. "Do not include locations")
+- `chunk_size` / `chunk_overlap` *(optional)* — how the text is split before being sent to the
+  LLM, in **tokens** (default 1500 / 60). Image rules inherit these from the text rule they
+  reference. See [tests/eval](../../tests/eval/README.md) for how to choose them.
 
 `LLMTextRedactionConfig.create_system_prompt()` (in `config.py`) compiles these fields into
 the actual system prompt sent to the LLM, wrapping `system_prompt`, `redaction_terms`,

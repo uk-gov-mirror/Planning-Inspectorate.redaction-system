@@ -4,7 +4,6 @@ from abc import ABC, abstractmethod
 from itertools import chain
 from typing import Any, ClassVar
 
-from langchain_text_splitters import RecursiveCharacterTextSplitter
 from PIL import Image
 
 from ..analysis import AzureImageAnalyser, LLMTextAnalyser, SignatureDetector
@@ -123,10 +122,6 @@ class LLMTextRedactor(TextRedactor):
     Loosely based on https://learn.microsoft.com/en-us/azure/ai-foundry/openai/how-to/structured-outputs?view=foundry-classic&tabs=python-secure%2Cdotnet-entra-id&pivots=programming-language-python
     """
 
-    TEXT_SPLITTER = RecursiveCharacterTextSplitter(
-        chunk_size=6000, chunk_overlap=250, separators=["\n\n", "\n", " ", ""]
-    )
-
     @classmethod
     def get_name(cls) -> str:
         return "LLMTextRedaction"
@@ -158,7 +153,7 @@ class LLMTextRedactor(TextRedactor):
         system_prompt = self.config.create_system_prompt()
 
         # The user's prompt will just be the raw text
-        text_chunks = self.TEXT_SPLITTER.split_text(text_to_analyse)
+        text_chunks = self.config.create_text_splitter().split_text(text_to_analyse)
         LoggingUtil().log_info(
             f"The text has been broken down into {len(text_chunks)} chunks"
         )
@@ -651,12 +646,13 @@ class ImageLLMTextRedactor(ImageTextRedactor, LLMTextRedactor):
         if all(not text for text in text_content):
             LoggingUtil().log_info("No text to analyse, skipping LLM analysis")
             return (), ()
+        text_splitter = self.config.create_text_splitter()
         image_text_content = tuple(
             {
                 "image": image_to_redact,
                 "text_rect_map": text_rect_map,
                 "text_content": text_content[i],
-                "text_chunks": self.TEXT_SPLITTER.split_text(text_content[i]),
+                "text_chunks": text_splitter.split_text(text_content[i]),
                 "redaction_strings": [],
             }
             for i, (image_to_redact, text_rect_map) in enumerate(image_text_rect_map)

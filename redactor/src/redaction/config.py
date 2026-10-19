@@ -1,5 +1,6 @@
 from langchain_core.prompts import PromptTemplate
-from pydantic import BaseModel, Field
+from langchain_text_splitters import RecursiveCharacterTextSplitter
+from pydantic import BaseModel, Field, model_validator
 
 from ..analysis.text import LLMTextAnalyserConfig
 from ..types import PydanticImage
@@ -34,6 +35,25 @@ class LLMTextRedactionConfigBase(RedactionConfig, LLMTextAnalyserConfig):
         '"terms". List them as they appear in the text. '
         "</OutputFormat>"
     )
+    chunk_size: int = Field(1500, gt=0)
+    """Maximum number of tokens in each chunk of text sent to the LLM"""
+    chunk_overlap: int = Field(60, ge=0)
+    """Number of tokens shared between consecutive chunks"""
+
+    @model_validator(mode="after")
+    def _check_chunk_overlap(self):
+        if self.chunk_overlap >= self.chunk_size:
+            raise ValueError("chunk_overlap must be smaller than chunk_size")
+        return self
+
+    def create_text_splitter(self) -> RecursiveCharacterTextSplitter:
+        """Create a token-based text splitter using this config's chunk settings"""
+        return RecursiveCharacterTextSplitter.from_tiktoken_encoder(
+            encoding_name=self.token_encoding_name,
+            chunk_size=self.chunk_size,
+            chunk_overlap=self.chunk_overlap,
+            separators=["\n\n", "\n", " ", ""],
+        )
 
 
 class LLMTextRedactionConfig(TextRedactionConfig, LLMTextRedactionConfigBase):
