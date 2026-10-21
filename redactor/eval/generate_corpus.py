@@ -124,7 +124,8 @@ SCENARIOS = [
         "doc_type": "solar_farm_objection",
         "brief": "An objection to a solar farm. It accuses the named applicant of using "
         "forced labour in its supply chain, and makes general statements about "
-        "Xinjiang and the war in Ukraine.",
+        "Xinjiang and the war in Ukraine. Name the applicant company in full only "
+        "inside the forced-labour allegation, and elsewhere call it 'the applicant'.",
     },
     {
         "doc_type": "financial_submission",
@@ -331,8 +332,10 @@ class CorpusGenerator:
         Build a labelled document by generating sections until the target length.
 
         Labels that use an unknown rule or are not verbatim in the text are dropped
-        with a warning. The document is rejected (None) if labels conflict or fail
-        validation.
+        with a warning. If rules disagree about a string, the redact label wins, since
+        the redactor redacts every occurrence of a string whichever rule found it. The
+        document is rejected (None) if one rule labels a string both ways, or if it
+        fails validation.
 
         :param scenario: Dict with the `doc_type` and section `brief`.
         :param target_tokens: Approximate document length in tokens.
@@ -371,21 +374,26 @@ class CorpusGenerator:
                     warnings.append(f"dropped non-verbatim label: {generated.text!r}")
                     continue
                 existing = entities.get(generated.text)
-                if existing and existing.redact != generated.redact:
-                    return None, [
-                        *warnings,
-                        f"conflicting labels for {generated.text!r}",
-                    ]
-                entities.setdefault(
-                    generated.text,
-                    Entity(
-                        text=generated.text,
-                        rule=generated.rule,
-                        category=generated.category,
-                        redact=generated.redact,
-                        rationale=generated.rationale,
-                    ),
+                label = Entity(
+                    text=generated.text,
+                    rule=generated.rule,
+                    category=generated.category,
+                    redact=generated.redact,
+                    rationale=generated.rationale,
                 )
+                if existing and existing.redact != generated.redact:
+                    if existing.rule == generated.rule:
+                        return None, [
+                            *warnings,
+                            f"conflicting labels for {generated.text!r}",
+                        ]
+                    warnings.append(
+                        f"rules disagree about {generated.text!r}, keeping the redact label"
+                    )
+                    if generated.redact:
+                        entities[generated.text] = label
+                    continue
+                entities.setdefault(generated.text, label)
         document = Document(
             id=doc_id,
             doc_type=scenario["doc_type"],

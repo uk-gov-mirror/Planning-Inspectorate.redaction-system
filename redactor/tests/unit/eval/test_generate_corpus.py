@@ -4,8 +4,10 @@ import pytest
 from eval.generate_corpus import (
     MIN_SECTION_TOKENS,
     PROFILES,
+    SCENARIOS,
     SECTION_TOKENS,
     CorpusGenerator,
+    GeneratedEntity,
     GeneratedSection,
     parse_length_buckets,
 )
@@ -53,6 +55,68 @@ def test_generate_document__sizes_sections_to_remaining_tokens():
 
     assert requested[0] == SECTION_TOKENS
     assert MIN_SECTION_TOKENS <= requested[1] < SECTION_TOKENS
+
+
+def _generate_with_labels(labels):
+    """Generate a one-section document whose generator returns the given labels"""
+    text = "The applicant Fenmere Ltd uses forced labour. " + "word " * 300
+    entities = [
+        GeneratedEntity(
+            text="Fenmere Ltd",
+            rule=rule,
+            category="applicant",
+            redact=redact,
+            rationale="r",
+        )
+        for rule, redact in labels
+    ]
+
+    def fake_section(self, doc_type, brief, cast, previous, section_tokens):
+        return GeneratedSection(text=text, entities=entities, cast=[])
+
+    with (
+        patch.object(CorpusGenerator, "__init__", return_value=None),
+        patch.object(CorpusGenerator, "generate_section", fake_section),
+    ):
+        generator = CorpusGenerator()
+        generator.model = "test-model"
+        scenario = {"doc_type": "solar_farm_objection", "brief": "brief"}
+        return generator.generate_document("pe-0000-x", scenario, 100, "dev")
+
+
+@pytest.mark.parametrize(
+    "labels",
+    [
+        [("names", False), ("sensitive_info", True)],
+        [("sensitive_info", True), ("names", False)],
+    ],
+)
+def test_generate_document__cross_rule_conflict_keeps_redact_label(labels):
+    """
+    - Given two rules that disagree about the same string, in either order
+    - When I generate a document
+    - Then the document is kept with the redact label, and a warning is given
+    """
+    document, warnings = _generate_with_labels(labels)
+
+    assert document is not None
+    assert [(e.rule, e.redact) for e in document.entities] == [("sensitive_info", True)]
+    assert any("rules disagree" in warning for warning in warnings)
+
+
+def test_generate_document__same_rule_conflict_is_rejected():
+    document, warnings = _generate_with_labels([("names", False), ("names", True)])
+
+    assert document is None
+    assert warnings == ["conflicting labels for 'Fenmere Ltd'"]
+
+
+def test_solar_farm_scenario_limits_where_the_applicant_is_named():
+    brief = next(
+        s["brief"] for s in SCENARIOS if s["doc_type"] == "solar_farm_objection"
+    )
+
+    assert "only inside the forced-labour allegation" in brief
 
 
 def test_main__uses_profile_id_prefix(tmp_path):
