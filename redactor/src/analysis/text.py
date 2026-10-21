@@ -10,6 +10,7 @@ from azure.identity import (
     AzureCliCredential,
     ChainedTokenCredential,
     ManagedIdentityCredential,
+    get_bearer_token_provider,
 )
 from dotenv import load_dotenv
 from langchain_core.prompts import PromptTemplate
@@ -123,16 +124,16 @@ class LLMTextAnalyser:
         credential = ChainedTokenCredential(
             ManagedIdentityCredential(), AzureCliCredential()
         )
-        self.token = credential.get_token(
-            "https://cognitiveservices.azure.com/.default"
-        ).token
+        token_provider = get_bearer_token_provider(
+            credential, "https://cognitiveservices.azure.com/.default"
+        )
         LoggingUtil().log_info(
             f"Establishing connection to the LLM at {self.azure_endpoint}"
         )
         self.llm = AzureOpenAI(
             azure_endpoint=self.azure_endpoint,
             api_version="2024-12-01-preview",
-            azure_ad_token=self.token,
+            azure_ad_token_provider=token_provider,
         )
 
         # Validates and sets input_token_cost, output_token_cost, token_rate_limit and request_rate_limit
