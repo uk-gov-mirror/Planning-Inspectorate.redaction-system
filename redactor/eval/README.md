@@ -16,6 +16,7 @@ from inside the VNet (e.g. a pipeline agent or a VM on the network).
 | `corpus.py` | JSONL corpus schema (`Document`, `Entity`) and validation |
 | `scoring.py` | Entity-level matching and TP/FP/FN, precision, recall, F-beta |
 | `generate_corpus.py` | Generates a labelled synthetic corpus with an LLM |
+| `corpus_to_pdf.py` | Writes a corpus to PDFs, highlighting each labelled span with its label as metadata |
 | `convert_existing_samples.py` | Converts the labelled e2e PDFs into held-out documents |
 | `run_chunk_sweep.py` | Runs every rule over the corpus at each chunk size, and records predictions and token usage |
 | `summarise_chunk_sweep.py` | Scores sweep results, bootstraps confidence intervals and recommends a size |
@@ -108,6 +109,8 @@ Run all commands from the `redactor` directory.
 - `cross_rule_predictions`: correct redactions found by a different rule than the label's.
   They count as false positives only if no rule's label matches.
 - `unlocatable_predictions`: strings that don't occur in the text and so can't be applied.
+  An email address counts as one word, and a prediction that is only its name part
+  (`ada.merrin`) is located, since the redactor redacts that part of the address.
 - `boundary_recall`: recall on entities that were split across a chunk boundary. Low values
   suggest increasing the overlap.
 - `consistency`: fraction of entities with the same outcome in every repeat.
@@ -121,3 +124,23 @@ Run all commands from the `redactor` directory.
   consistency, variance and cost against chunk size).
 
 Keep the prompts frozen for the whole sweep. Changing a prompt invalidates the comparison.
+
+## Prompt engineering with MLflow
+
+`optimise_prompt.py` versions, scores and optimises each rule's system prompt with MLflow
+(install the `eval` extra). It stores everything in `eval/results/mlflow.db`; view it with
+`mlflow ui --backend-store-uri sqlite:///eval/results/mlflow.db`. Traces contain corpus text,
+so only use synthetic or approved data. The YAML config stays the source of truth.
+
+1. `register --chunk-size <chosen> --chunk-overlap <chosen>` registers every rule's prompt as
+   `redaction-<rule>@baseline`, with clause IDs (`[T1]`, `[D2]`, ...) and the chunk settings.
+2. `evaluate --rule names` scores a version on dev chunks with the scorers in
+   `mlflow_scorers.py` (F2, recall, precision, hard-negative hit rate, unlocatable rate,
+   clause citation validity). Edit the YAML and re-register to try manual changes.
+3. `optimise --rule names --optimizer meta`, then `--optimizer gepa` if needed, registers
+   `@candidate`. The reflection model is reached through LiteLLM with Entra ID.
+4. `gate --rule names --promote` runs both prompts over whole test documents and sets
+   `@champion` only if F2 is significantly better (paired bootstrap) without more
+   hard-negative hits.
+5. `export --rule names --out src/config/<name>.yaml` writes the champion into a copy of the
+   config for review against PINS guidance.

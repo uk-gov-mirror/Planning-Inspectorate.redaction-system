@@ -3,21 +3,51 @@
 Matching mirrors the production PDF matcher's leniency: comparison is on normalised
 words (case-insensitive, punctuation and possessives ignored), and a prediction only
 needs to cover part of an entity's words for that coverage to count. Like production,
-predictions are treated as strings to redact wherever they occur.
+predictions are treated as strings to redact wherever they occur. An email address is
+one word, and a prediction that is only the name part of an address ("ada.merrin" in
+"ada.merrin@post.invalid") stands for the whole address, since that is what the redactor
+redacts.
 """
 
 import re
 from dataclasses import dataclass, fields
 
+from src.redaction.utils.text import get_normalised_words, is_email_name_part
+
 from .corpus import Document, Entity
 
 _POSSESSIVE = re.compile(r"['\u2019]s\b", re.IGNORECASE)
-_WORD = re.compile(r"[^\W_]+(?:[@][^\W_]+)?", re.UNICODE)
+_EMAIL = r"[\w.+\-]+@[^\W_]+(?:-[^\W_]+)*(?:\.[^\W_]+(?:-[^\W_]+)*)+"  # name@domain.tld
+_WORD = re.compile(rf"{_EMAIL}|[^\W_]+(?:[@][^\W_]+)?", re.UNICODE)
 
 
 def normalise_words(text: str) -> tuple[str, ...]:
-    """Lower-case text, strip possessives and split it into a tuple of words"""
+    """Lower-case text, strip possessives and split it into a tuple of words. An email
+    address is a single word"""
     return tuple(_WORD.findall(_POSSESSIVE.sub("", text).casefold()))
+
+
+class DocumentWords:
+    """The normalised words of a document, and of strings compared against it"""
+
+    def __init__(self, text: str):
+        """Normalise the document text and list its email addresses"""
+        self.words = normalise_words(text)
+        self.emails = tuple(dict.fromkeys(w for w in self.words if "@" in w))
+
+    def of(self, text: str) -> tuple[str, ...]:
+        """
+        Normalise a string to compare with the document. A single term that is not a
+        word of the document, but is the name part of an email address in it, stands
+        for the whole address.
+        """
+        words = normalise_words(text)
+        terms = get_normalised_words(text)
+        if words and len(terms) == 1 and not find_subsequence(self.words, words):
+            for email in self.emails:
+                if is_email_name_part(email, terms[0].casefold()):
+                    return (email,)
+        return words
 
 
 def find_subsequence(haystack: tuple[str, ...], needle: tuple[str, ...]) -> list[int]:
@@ -134,14 +164,14 @@ def positive_outcomes(
     coverage_threshold: float = 0.8,
 ) -> dict[str, bool]:
     """Map each positive entity's text to whether the predictions redacted it"""
-    document_words = normalise_words(document.text)
+    document_words = DocumentWords(document.text)
     located = [
         words
-        for words in (normalise_words(p) for p in predictions)
-        if words and find_subsequence(document_words, words)
+        for words in (document_words.of(p) for p in predictions)
+        if words and find_subsequence(document_words.words, words)
     ]
     return {
-        entity.text: coverage(normalise_words(entity.text), located)
+        entity.text: coverage(document_words.of(entity.text), located)
         >= coverage_threshold
         for entity in document.positives(rule)
     }
@@ -164,7 +194,7 @@ def score_document(
     :param boundary_split: Texts of entities that were split across chunk boundaries.
     """
     boundary_split = boundary_split or set()
-    document_words = normalise_words(document.text)
+    document_words = DocumentWords(document.text)
     positives = document.positives(rule)
     other_positives = (
         tuple(e for e in document.positives() if e.rule != rule) if rule else ()
@@ -172,9 +202,9 @@ def score_document(
     negatives = document.negatives(rule)
 
     prediction_words = list(
-        dict.fromkeys(w for w in (normalise_words(p) for p in predictions) if w)
+        dict.fromkeys(w for w in (document_words.of(p) for p in predictions) if w)
     )
-    located = [p for p in prediction_words if find_subsequence(document_words, p)]
+    located = [p for p in prediction_words if find_subsequence(document_words.words, p)]
 
     counts = ScoreCounts(
         positives=len(positives),
@@ -184,7 +214,7 @@ def score_document(
     )
 
     for entity in positives:
-        entity_coverage = coverage(normalise_words(entity.text), located)
+        entity_coverage = coverage(document_words.of(entity.text), located)
         is_split = entity.text in boundary_split
         counts.boundary_positives += is_split
         if entity_coverage >= coverage_threshold:
@@ -194,8 +224,8 @@ def score_document(
             counts.false_negatives += 1
             counts.partial_positives += entity_coverage > 0
 
-    positive_words = [normalise_words(e.text) for e in positives]
-    other_positive_words = [normalise_words(e.text) for e in other_positives]
+    positive_words = [document_words.of(e.text) for e in positives]
+    other_positive_words = [document_words.of(e.text) for e in other_positives]
     false_positive_words = []
     for prediction in located:
         if any(overlaps(prediction, words) for words in positive_words):
@@ -208,7 +238,7 @@ def score_document(
 
     counts.hard_negative_hits = sum(
         any(
-            overlaps(prediction, normalise_words(entity.text))
+            overlaps(prediction, document_words.of(entity.text))
             for prediction in false_positive_words
         )
         for entity in negatives

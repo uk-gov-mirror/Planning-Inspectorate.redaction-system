@@ -58,6 +58,11 @@ dev = [
     "ruff",
     "toml",
 ]
+eval = [
+    "gepa>=0.1.4",
+    "litellm>=1.106.2",
+    "mlflow>=3.5",
+]
 
 [tool.setuptools.packages.find]
 where = ["redactor"]
