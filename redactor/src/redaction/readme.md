@@ -50,6 +50,9 @@ page. `PDFProcessor._apply_provisional_text_redactions` and
    (`_find_potential_matches_in_line` / `_match_word_to_redact_in_line`). Matching is
    deliberately fuzzy: it tolerates plurals/possessives (`"Bob's"` matching `"Bob"`), words
    fused together by a missing space (e.g. `"somethingMonica"`), and hyphenated terms.
+   A single-word term also matches the email address it is the name part of (`"ada.merrin"`
+   or `"merrin"` in `ada.merrin@post.invalid`, never the domain), and the whole address is
+   highlighted since only whole-word coordinates are stored.
    Multi-word terms are matched by walking consecutive words (`_check_subsequent_words`).
 4. Once a match's start/end word indices on a line are known, `_construct_pdf_rect` builds
    the highlight's bounding box directly from those words' stored coordinates.

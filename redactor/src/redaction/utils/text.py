@@ -1,3 +1,4 @@
+import re
 import threading
 from string import punctuation
 from unicodedata import category
@@ -85,3 +86,61 @@ def get_normalised_words(text: str) -> list[str]:
         for word in (text_normalised)
     ]
     return [word for word in words_normalised if word]  # Remove empty words
+
+
+def email_name_part_span(token: str, word: str) -> tuple[int, int] | None:
+    """
+    Find where a word is in the name part (before the "@") of an email address, as a
+    whole component, e.g. "ada.merrin" or "merrin" in "ada.merrin@post.invalid". The
+    domain never matches, and neither does a part of a component (e.g. "errin"). The
+    full address is an exact match, so is not matched here.
+
+    :param str token: A normalised word from the document
+    :param str word: A normalised word to redact
+    :return tuple[int, int] | None: The start and end index in the token, from the
+        first match to the last if the word is repeated, or None if there is no match
+    """
+    name_part, at_sign, _ = token.partition("@")
+    if not at_sign or not word or "@" in word:
+        return None
+    matches = list(re.finditer(rf"(?<![^\W_]){re.escape(word)}(?![^\W_])", name_part))
+    if not matches:
+        return None
+    return matches[0].start(), matches[-1].end()
+
+
+def is_email_name_part(token: str, word: str) -> bool:
+    """Return True if the word is in the name part of the token, an email address"""
+    return email_name_part_span(token, word) is not None
+
+
+def normalised_character_origins(text: str) -> list[int] | None:
+    """
+    Find which character of the text each character of `normalise_text(text)` came
+    from, so a part of a normalised word can be found in the original text.
+
+    :return list[int] | None: The index in the text of each normalised character, or
+        None if the normalisation can't be reproduced character by character.
+    """
+    characters = []
+    for index, char in enumerate(text):
+        replacement = (
+            unidecode(char) or char if category(char).startswith("P") else char
+        )
+        characters.extend((c, index) for c in replacement.lower())
+
+    # Mirror normalise_text: strip whitespace, then strip punctuation
+    start, end = 0, len(characters)
+    while start < end and characters[start][0].isspace():
+        start += 1
+    while end > start and characters[end - 1][0].isspace():
+        end -= 1
+    while start < end and characters[start][0] in punctuation:
+        start += 1
+    while end > start and characters[end - 1][0] in punctuation:
+        end -= 1
+
+    kept = characters[start:end]
+    if "".join(char for char, _ in kept) != normalise_text(text):
+        return None
+    return [index for _, index in kept]

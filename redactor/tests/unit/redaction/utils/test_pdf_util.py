@@ -560,6 +560,26 @@ class TestMatchWordToRedactInLine:
             == []
         )
 
+    def test_email_name_part(self):
+        """The name part of an email address is matched only when allow_email_name_part is set."""
+        words_to_check = np.array(
+            ["email", "ada.merrin@post.invalid", "ada.merrinsmith"], dtype=str
+        )
+
+        assert PDFUtil._match_word_to_redact_in_line("ada.merrin", words_to_check) == []
+        assert PDFUtil._match_word_to_redact_in_line(
+            "ada.merrin", words_to_check, allow_email_name_part=True
+        ) == [1]
+
+    def test_email_domain_not_matched(self):
+        words_to_check = np.array(["ada.merrin@post.invalid"], dtype=str)
+        assert (
+            PDFUtil._match_word_to_redact_in_line(
+                "post", words_to_check, allow_email_name_part=True
+            )
+            == []
+        )
+
 
 class TestCheckSubsequentWords:
     @dataclass(frozen=True)
@@ -832,3 +852,147 @@ class TestExtractUniquePdfImages:
         ]
         actual_output = PDFUtil.extract_unique_pdf_images(image_metadata)
         assert expected_output == actual_output
+
+
+class TestExamineProvisionalTextRedactionEmail:
+    """Unpatched matching, so these cover the whole path from term to highlight"""
+
+    def _examine(self, term, line):
+        page_metadata = create_mock_page_metadata(line, [line])
+        return page_metadata, PDFUtil.examine_provisional_text_redaction(
+            term, page_metadata
+        )
+
+    @pytest.mark.parametrize("term", ["ada.merrin", "Ada", "merrin"])
+    def test_name_part_highlights_the_whole_address_without_a_page(self, term):
+        """Without the page there are no character coordinates, so the whole word is used"""
+        line = "Email me at ada.merrin@post.invalid today"
+        page_metadata, result = self._examine(term, line)
+
+        line_metadata = page_metadata.lines[0]
+        rect = pymupdf.Rect(
+            line_metadata.x0[3],
+            line_metadata.y0,
+            line_metadata.x1[3],
+            line_metadata.y1,
+        )
+        assert result == [(0, rect, term)]
+
+    @pytest.mark.parametrize("term", ["post", "invalid", "errin", "adam"])
+    def test_domain_and_partial_components_not_highlighted(self, term):
+        _, result = self._examine(term, "Email me at ada.merrin@post.invalid today")
+
+        assert result == []
+
+    def test_full_address_still_highlighted(self):
+        _, result = self._examine(
+            "ada.merrin@post.invalid", "Email me at ada.merrin@post.invalid today"
+        )
+
+        assert len(result) == 1
+
+    def test_name_part_not_highlighted_in_a_word_without_an_at_sign(self):
+        """The exception is only for email addresses"""
+        _, result = self._examine("ada.merrin", "Email me at ada.merrinsmith today")
+
+        assert result == []
+
+
+def _real_page(*lines: str) -> pymupdf.Page:
+    pdf = pymupdf.open()
+    page = pdf.new_page()
+    for i, line in enumerate(lines):
+        page.insert_text((72, 72 + 30 * i), line)
+    return page
+
+
+def _x_range(rect) -> tuple[float, float]:
+    return rect.x0, rect.x1
+
+
+class TestPartialWordHighlights:
+    """Terms that match part of a word are narrowed to that part, using the page's
+    character coordinates, which pymupdf's own text search is used here to check"""
+
+    def _examine(self, page, term):
+        return PDFUtil.examine_provisional_text_redaction(
+            term, PDFUtil.extract_page_metadata(page), page=page
+        )
+
+    @pytest.mark.parametrize(
+        ("term", "found_text"),
+        [
+            ("ada.merrin", "ada.merrin"),
+            ("Merrin", "merrin"),
+            ("ADA", "ada"),
+        ],
+    )
+    def test_email_name_part(self, term, found_text):
+        page = _real_page("Email me at Ada.Merrin@post.invalid today.")
+
+        [(_, rect, result_term)] = self._examine(page, term)
+
+        assert result_term == term
+        assert _x_range(rect) == pytest.approx(
+            _x_range(page.search_for(found_text)[0]), abs=0.5
+        )
+
+    def test_email_with_surrounding_punctuation(self):
+        page = _real_page("Contact \u201cada.merrin@post.invalid\u201d, please")
+
+        [(_, rect, _)] = self._examine(page, "ada.merrin")
+
+        assert _x_range(rect) == pytest.approx(
+            _x_range(page.search_for("ada.merrin")[0]), abs=0.5
+        )
+
+    def test_word_fused_to_the_previous_word(self):
+        page = _real_page("Thanks somethingMonica Cowan for that")
+
+        [(_, rect, _)] = self._examine(page, "Monica Cowan")
+
+        assert _x_range(rect) == pytest.approx(
+            _x_range(page.search_for("Monica Cowan")[0]), abs=0.5
+        )
+
+    def test_word_fused_to_the_next_word(self):
+        page = _real_page("Dear Christine Watts-Hughgeneva now")
+
+        [(_, rect, _)] = self._examine(page, "Christine Watts-Hugh")
+
+        expected = page.search_for("Christine Watts-Hugh")[0]
+        assert _x_range(rect) == pytest.approx(_x_range(expected), abs=0.5)
+
+    def test_whole_words_are_not_narrowed(self):
+        page = _real_page("Dear Bob's friend Monica")
+
+        [(_, rect, _)] = self._examine(page, "Bob")
+
+        assert _x_range(rect) == pytest.approx(
+            _x_range(page.search_for("Bob's")[0]), abs=0.5
+        )
+
+    def test_characters_are_only_extracted_for_partial_word_matches(self):
+        page = _real_page("Dear Bob, email ada.merrin@post.invalid")
+
+        with patch.object(
+            PDFUtil, "get_character_edges", wraps=PDFUtil.get_character_edges
+        ) as mock_edges:
+            self._examine(page, "Bob")
+            mock_edges.assert_not_called()
+            self._examine(page, "ada.merrin")
+            mock_edges.assert_called_once()
+
+    def test_keeps_the_whole_word_if_the_characters_do_not_match_the_word(self):
+        """A blank page has no characters, so the word's own coordinates are used"""
+        page = _real_page("Email me at ada.merrin@post.invalid today.")
+        page_metadata = PDFUtil.extract_page_metadata(page)
+        blank_page = pymupdf.open().new_page()
+
+        [(_, rect, _)] = PDFUtil.examine_provisional_text_redaction(
+            "ada.merrin", page_metadata, page=blank_page
+        )
+
+        assert _x_range(rect) == pytest.approx(
+            _x_range(page.search_for("ada.merrin@post.invalid")[0]), abs=0.5
+        )
