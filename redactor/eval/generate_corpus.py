@@ -12,8 +12,14 @@ human-review a sample of documents before relying on the corpus.
 
 Example (run from the `redactor` directory, with Azure credentials available):
 
-    python -m tests.eval.generate_corpus --model gpt-5.6-sol \
-        --documents 120 --out tests/eval/data/corpus.jsonl
+    python -m eval.generate_corpus --model gpt-5.6-sol \
+        --documents 120 --out eval/data/corpus.jsonl
+
+A separate corpus for prompt engineering, with mostly medium-length documents and its
+own ids so it can never collide with the chunk-sweep corpus:
+
+    python -m eval.generate_corpus --model gpt-5.6-sol --profile prompt \
+        --documents 100 --seed 1 --out eval/data/prompt_corpus.jsonl
 """
 
 import argparse
@@ -153,7 +159,19 @@ LENGTH_BUCKETS = [  # (target tokens, weight)
     (10000, 2),
     (25000, 1),
 ]
+PROMPT_LENGTH_BUCKETS = [  # Mostly 2-4 chunks at the default chunk size
+    (1200, 2),
+    (2500, 3),
+    (4000, 4),
+    (6000, 3),
+    (10000, 1),
+]
+PROFILES = {
+    "sweep": {"length_buckets": LENGTH_BUCKETS, "id_prefix": "syn"},
+    "prompt": {"length_buckets": PROMPT_LENGTH_BUCKETS, "id_prefix": "pe"},
+}
 SECTION_TOKENS = 1200
+MIN_SECTION_TOKENS = 200
 FILLER_FRACTION = 0.4
 
 
@@ -268,7 +286,12 @@ class CorpusGenerator:
         return response.choices[0].message.parsed
 
     def generate_section(
-        self, doc_type: str, brief: str, cast: list[str], previous: str
+        self,
+        doc_type: str,
+        brief: str,
+        cast: list[str],
+        previous: str,
+        section_tokens: int = SECTION_TOKENS,
     ) -> GeneratedSection:
         """
         Generate one section of a document along with its entity labels.
@@ -276,11 +299,12 @@ class CorpusGenerator:
         :param brief: Description of what the section should contain.
         :param cast: People introduced so far, so they can be reused for continuity.
         :param previous: Text generated so far; its tail is used to continue from.
+        :param section_tokens: Approximate length of the section in tokens.
         """
         prompt = (
             f"Document type: {doc_type}\n"
             f"Section brief: {brief}\n"
-            f"Target length: about {SECTION_TOKENS * 3 // 4} words.\n"
+            f"Target length: about {section_tokens * 3 // 4} words.\n"
             "Cast introduced so far (reuse these people and refer to them again where "
             f"natural): {json.dumps(cast) if cast else 'none yet'}\n"
             f"End of the previous section, to continue from: {previous[-800:] or 'n/a'}"
@@ -325,8 +349,16 @@ class CorpusGenerator:
         while tokens < target_tokens:
             use_filler = sections and rng.random() < FILLER_FRACTION
             brief = FILLER_BRIEF if use_filler else scenario["brief"]
+            # Size the section to what is left, so documents land near their target
+            section_tokens = max(
+                MIN_SECTION_TOKENS, min(SECTION_TOKENS, target_tokens - tokens)
+            )
             section = self.generate_section(
-                scenario["doc_type"], brief, cast, "\n\n".join(sections)
+                scenario["doc_type"],
+                brief,
+                cast,
+                "\n\n".join(sections),
+                section_tokens,
             )
             sections.append(section.text)
             cast.extend(c for c in section.cast if c not in cast)
@@ -374,6 +406,23 @@ def assign_split(doc_id: str, test_fraction: float) -> str:
     return "test" if bucket < test_fraction * 1000 else "dev"
 
 
+def parse_length_buckets(values: list[str]) -> list[tuple[int, int]]:
+    """Parse TOKENS:WEIGHT pairs, e.g. ["2500:3", "6000:1"]
+
+    :raises ValueError: If a pair is malformed or its tokens or weight are not positive.
+    """
+    buckets = []
+    for value in values:
+        try:
+            tokens, weight = (int(part) for part in value.split(":"))
+        except ValueError:
+            raise ValueError(f"Expected TOKENS:WEIGHT, got {value!r}") from None
+        if tokens < 1 or weight < 1:
+            raise ValueError(f"Tokens and weight must be positive, got {value!r}")
+        buckets.append((tokens, weight))
+    return buckets
+
+
 def main(argv=None):
     """Command line entry point: generate documents and append them to --out.
 
@@ -386,6 +435,24 @@ def main(argv=None):
     parser.add_argument("--config", default="default")
     parser.add_argument("--test-fraction", type=float, default=0.3)
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument(
+        "--profile",
+        choices=list(PROFILES),
+        default="sweep",
+        help="Preset length mix and id prefix: 'sweep' for the chunk-size corpus, "
+        "'prompt' for mostly medium-length documents for prompt engineering",
+    )
+    parser.add_argument(
+        "--length-buckets",
+        nargs="+",
+        metavar="TOKENS:WEIGHT",
+        help="Override the profile's length mix, e.g. 2500:3 4000:4 6000:3",
+    )
+    parser.add_argument(
+        "--id-prefix",
+        help="Prefix of document ids. Defaults to the profile's. Use a different "
+        "prefix for each corpus, since ids also decide the dev/test split",
+    )
     parser.add_argument("--max-attempts", type=int, default=3)
     parser.add_argument("--no-audit", action="store_true")
     parser.add_argument(
@@ -407,14 +474,21 @@ def main(argv=None):
         args.model, guideline_summary(args.config), audit=not args.no_audit
     )
     rng = np.random.default_rng(args.seed)
-    sizes, weights = zip(*LENGTH_BUCKETS, strict=True)
+    profile = PROFILES[args.profile]
+    buckets = (
+        parse_length_buckets(args.length_buckets)
+        if args.length_buckets
+        else profile["length_buckets"]
+    )
+    id_prefix = args.id_prefix or profile["id_prefix"]
+    sizes, weights = zip(*buckets, strict=True)
     probabilities = np.array(weights) / sum(weights)
 
     tasks = []
     for index in range(args.documents):
         scenario = SCENARIOS[index % len(SCENARIOS)]
         target_tokens = int(rng.choice(sizes, p=probabilities))
-        doc_id = f"syn-{index:04d}-{scenario['doc_type']}"
+        doc_id = f"{id_prefix}-{index:04d}-{scenario['doc_type']}"
         if doc_id in existing_ids:
             continue
         split = assign_split(doc_id, args.test_fraction)
