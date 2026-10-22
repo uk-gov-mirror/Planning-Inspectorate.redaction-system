@@ -128,6 +128,13 @@ class ScoreCounts:
         )
 
     @property
+    def unlocatable_rate(self) -> float:
+        """Share of predictions that do not occur in the text (0.0 if there are none)"""
+        return (
+            self.unlocatable_predictions / self.predictions if self.predictions else 0.0
+        )
+
+    @property
     def boundary_recall(self) -> float | None:
         """Recall for entities split across chunks, or None if there were none"""
         if not self.boundary_positives:
@@ -144,6 +151,28 @@ def f_beta(precision: float, recall: float, beta: float = 2.0) -> float:
     b2 = beta**2
     denominator = b2 * precision + recall
     return (1 + b2) * precision * recall / denominator if denominator else 0.0
+
+
+# Judgement defaults, not fitted to data
+HARD_NEGATIVE_WEIGHT = 0.5
+UNLOCATABLE_WEIGHT = 0.25
+
+
+def objective_score(
+    f2: float,
+    hard_negative_rate: float,
+    unlocatable_rate: float,
+    hard_negative_weight: float = HARD_NEGATIVE_WEIGHT,
+    unlocatable_weight: float = UNLOCATABLE_WEIGHT,
+) -> float:
+    """F2 less penalties for redacting must-keep spans and for predictions that are not
+    in the text, clipped to [0, 1]"""
+    score = (
+        f2
+        - hard_negative_weight * hard_negative_rate
+        - unlocatable_weight * unlocatable_rate
+    )
+    return min(max(score, 0.0), 1.0)
 
 
 def boundary_split_entities(

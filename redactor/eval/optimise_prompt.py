@@ -51,7 +51,11 @@ from .prompt_registry import (
     register_rule_prompt,
 )
 from .run_chunk_sweep import load_rule_configs
-from .scoring import score_document
+from .scoring import (
+    HARD_NEGATIVE_WEIGHT,
+    UNLOCATABLE_WEIGHT,
+    score_document,
+)
 from .summarise_chunk_sweep import ScoredRun, bootstrap_f_beta_differences, summarise
 
 EXPERIMENT_NAME = "redaction-prompt-engineering"
@@ -496,7 +500,7 @@ def parse_args(argv=None) -> argparse.Namespace:
     optimise.add_argument("--optimizer", choices=["meta", "gepa"], default="meta")
     optimise.add_argument(
         "--reflection-model",
-        default="azure:/gpt-5.6-luna",
+        default="azure:/gpt-6-sol",
         help="MLflow model URI of the model that rewrites the prompt",
     )
     optimise.add_argument("--guidelines", default=META_GUIDELINES)
@@ -514,8 +518,12 @@ def parse_args(argv=None) -> argparse.Namespace:
     )
     optimise.add_argument("--max-records", type=int, help="Sample N training chunks")
     optimise.add_argument("--empty-chunk-ratio", type=float, default=0.25)
-    optimise.add_argument("--hard-negative-weight", type=float, default=0.5)
-    optimise.add_argument("--unlocatable-weight", type=float, default=0.25)
+    optimise.add_argument(
+        "--hard-negative-weight", type=float, default=HARD_NEGATIVE_WEIGHT
+    )
+    optimise.add_argument(
+        "--unlocatable-weight", type=float, default=UNLOCATABLE_WEIGHT
+    )
     optimise.add_argument("--alias", default="candidate")
     optimise.set_defaults(func=cmd_optimise)
 

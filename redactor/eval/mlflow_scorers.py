@@ -13,9 +13,12 @@ from mlflow.genai.scorers import scorer
 
 from .corpus import Document, Entity
 from .scoring import (
+    HARD_NEGATIVE_WEIGHT,
+    UNLOCATABLE_WEIGHT,
     DocumentWords,
     ScoreCounts,
     find_subsequence,
+    objective_score,
     overlaps,
     positive_outcomes,
     score_document,
@@ -140,13 +143,8 @@ def hard_negative_hit_rate(inputs: dict, outputs: Any, expectations: dict) -> Fe
 @scorer
 def unlocatable_rate(inputs: dict, outputs: Any, expectations: dict) -> Feedback:
     counts = _counts(inputs, outputs, expectations)
-    value = (
-        counts.unlocatable_predictions / counts.predictions
-        if counts.predictions
-        else 0.0
-    )
     return Feedback(
-        value=value,
+        value=counts.unlocatable_rate,
         rationale=(
             f"{counts.unlocatable_predictions} of {counts.predictions} predictions are "
             "not in the text"
@@ -195,10 +193,11 @@ SCORERS = [
 
 
 def make_objective(
-    hard_negative_weight: float = 0.5, unlocatable_weight: float = 0.25
+    hard_negative_weight: float = HARD_NEGATIVE_WEIGHT,
+    unlocatable_weight: float = UNLOCATABLE_WEIGHT,
 ) -> Callable[[dict[str, Any]], float]:
-    """Single score for the optimiser: F2, penalised for redacting must-keep spans and
-    for predictions that cannot be applied, clipped to [0, 1]"""
+    """Single score for the optimiser, from the f2, hard_negative_hit_rate and
+    unlocatable_rate scorers (see `objective_score`)"""
 
     def value(scores: dict[str, Any], name: str) -> float:
         score = scores.get(name)
@@ -206,11 +205,12 @@ def make_objective(
         return float(score or 0.0)
 
     def objective(scores: dict[str, Any]) -> float:
-        score = (
-            value(scores, "f2")
-            - hard_negative_weight * value(scores, "hard_negative_hit_rate")
-            - unlocatable_weight * value(scores, "unlocatable_rate")
+        return objective_score(
+            value(scores, "f2"),
+            value(scores, "hard_negative_hit_rate"),
+            value(scores, "unlocatable_rate"),
+            hard_negative_weight,
+            unlocatable_weight,
         )
-        return min(max(score, 0.0), 1.0)
 
     return objective
