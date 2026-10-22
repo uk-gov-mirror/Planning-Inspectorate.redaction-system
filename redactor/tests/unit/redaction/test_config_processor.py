@@ -333,3 +333,42 @@ def test__config_processor__convert_to_redaction_config__with_invalid_config():
     config = {"redactor_type": "A", "property_a": 1, "bah": 2}
     with pytest.raises(Exception):  # noqa: B017
         ConfigProcessor.convert_to_redaction_config(config, ConfigInst)
+
+
+def test__config_processor__validate_and_parse_redaction_config__extra_sections():
+    """
+    - Given a text rule with extra_sections and an image rule that references it
+    - When I parse the config with the real redactor types
+    - Then the image rule inherits the extra sections, so both build the same prompt
+    """
+    config = {
+        "redactors": [
+            {
+                "redactor_type": "LLMTextRedaction",
+                "redaction_rules": [
+                    {
+                        "name": "text_rule",
+                        "model": "gpt-5.6-luna",
+                        "role": "Some role",
+                        "task": "Some task",
+                        "redaction_terms": ["rule A"],
+                        "extra_sections": {"EdgeCases": ["case A"]},
+                    }
+                ],
+            },
+            {
+                "redactor_type": "ImageLLMTextRedaction",
+                "redaction_rules": [
+                    {"name": "image_rule", "text_redaction_rule": "text_rule"}
+                ],
+            },
+        ],
+    }
+
+    text_rule, image_rule = ConfigProcessor.validate_and_parse_redaction_config(config)
+
+    assert image_rule.extra_sections == {"EdgeCases": ["case A"]}
+    assert image_rule.create_system_prompt() == text_rule.create_system_prompt()
+    assert text_rule.create_system_prompt().endswith(
+        "<EdgeCases>\n- case A\n</EdgeCases>"
+    )

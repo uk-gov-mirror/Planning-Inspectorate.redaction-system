@@ -173,3 +173,50 @@ def test_llm_text_redaction_config__optional_sections_survive_a_round_trip():
         None,
     )
     assert rebuilt.chunk_size == 4500
+
+
+def test_llm_text_redaction_config__extra_sections_follow_the_examples():
+    """
+    - Given a config with examples and two extra sections
+    - When I create the system prompt, with and without clause IDs
+    - Then the extra sections come last, in order, and never carry clause IDs
+    """
+    config = _create_config(
+        examples=["example 1"],
+        extra_sections={"EdgeCases": ["case A", "case B"], "Style": ["be brief"]},
+    )
+    extra = (
+        "<EdgeCases>\n- case A\n- case B\n</EdgeCases>\n\n<Style>\n- be brief\n</Style>"
+    )
+
+    assert config.create_system_prompt() == (
+        "<Role>\nSome role\n</Role>\n\n<Task>\nSome task\n</Task>\n\n"
+        "<Terms>\n- rule A\n</Terms>\n\n<Examples>\n- example 1\n</Examples>\n\n"
+        + extra
+    )
+    numbered = config.model_copy(update={"include_rationale": True})
+    assert numbered.create_system_prompt().endswith(
+        "<Examples>\n- [E1] example 1\n</Examples>\n\n" + extra
+    )
+
+
+def test_llm_text_redaction_config__no_extra_sections_leaves_prompt_unchanged():
+    assert (
+        _create_config().create_system_prompt()
+        == _create_config(extra_sections={}).create_system_prompt()
+    )
+
+
+@pytest.mark.parametrize(
+    ("extra_sections", "message"),
+    [
+        ({"edgeCases": ["x"]}, "CamelCase"),
+        ({"Edge Cases": ["x"]}, "CamelCase"),
+        ({"DoNotRedact": ["x"]}, "already a section"),
+        ({"Task": ["x"]}, "already a section"),
+        ({"EdgeCases": []}, "at least one item"),
+    ],
+)
+def test_llm_text_redaction_config__invalid_extra_sections(extra_sections, message):
+    with pytest.raises(ValidationError, match=message):
+        _create_config(extra_sections=extra_sections)

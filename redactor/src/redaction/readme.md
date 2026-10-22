@@ -110,6 +110,10 @@ For `LLMTextRedaction` rules, each rule has:
   (e.g. "do not redact the author's own name")
 - `examples` *(optional)* — short worked examples illustrating correct redaction decisions for
   ambiguous cases, phrased as "text — decision, because reason"
+- `extra_sections` *(optional)* — further prompt sections, as a map of CamelCase XML tag to a
+  list of bullets (e.g. `EdgeCases: [...]`). They are added after `<Examples>`, in the order
+  given, without clause IDs. Tags can't reuse a standard section name. Prompt optimisation
+  can add these when the standard sections can't carry what it learns
 - `chunk_size` / `chunk_overlap` *(optional)* — how the text is split before being sent to the
   LLM, in **tokens** (default 1500 / 60). Image rules inherit these from the text rule they
   reference. See [tests/eval](../../tests/eval/README.md) for how to choose them.
@@ -117,8 +121,8 @@ For `LLMTextRedaction` rules, each rule has:
 `LLMTextRedactionConfig.create_system_prompt()` (in `config.py`) compiles these fields into
 the actual system prompt sent to the LLM, wrapping `role`, `task`, `redaction_terms`,
 `must_redact`, `do_not_redact`, and `examples` in XML tags (`<Role>`, `<Task>`, `<Terms>`,
-`<MustRedact>`, `<DoNotRedact>`, `<Examples>`). The optional sections are omitted from the
-prompt entirely when not set. The LLM's output shape itself is enforced separately by
+`<MustRedact>`, `<DoNotRedact>`, `<Examples>`, then any `extra_sections` under their own
+tags). The optional sections are omitted from the prompt entirely when not set. The LLM's output shape itself is enforced separately by
 `LLMRedactionResultFormat` (in `types.py`) via the model's structured output / JSON schema
 support, so the prompt doesn't need to describe the output format.
 
