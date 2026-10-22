@@ -68,16 +68,51 @@ DEFAULT_TRACKING_URI = f"sqlite:///{RESULTS_DIR.as_posix()}/mlflow.db"
 AZURE_API_VERSION = "2024-12-01-preview"
 AZURE_TOKEN_SCOPE = "https://cognitiveservices.azure.com/.default"  # nosec: B105
 LLM_COMMANDS = ("evaluate", "optimise", "gate")
+_CLAUSE_RULES = (
+    "Keep the [T1]-style clause "
+    "labels, renumbering them in order within each section if clauses are added or "
+    "removed. Do not add clauses that contradict a DoNotRedact clause or "
+    "PINS guidance, and keep the prompt concise. Do not describe the response format, "
+    "such as one term per line or what to omit: a response schema already enforces it."
+)
+PROMPT_FORMAT_RULES = (
+    "Keep the <Role>, <Task>, <Terms>, <MustRedact>, <DoNotRedact> and <Examples> XML "
+    "sections, with one '- ' bullet per clause, and add no text outside them. "
+    + _CLAUSE_RULES
+)
+GEPA_FORMAT_RULES = (
+    "Keep the <Role>, <Task>, <Terms>, <MustRedact>, <DoNotRedact> and <Examples> XML "
+    "sections, with one '- ' bullet per clause. You may add a further section after "
+    "them, but only if the feedback shows the existing sections cannot carry the "
+    "information. Give it its own CamelCase XML tag, with one '- ' bullet per item and "
+    "no [X1]-style labels. Add no text outside the XML sections. " + _CLAUSE_RULES
+)
 META_GUIDELINES = (
     "This system prompt instructs an LLM to find text to redact from UK Planning "
-    "Inspectorate (PINS) casework published online under UK GDPR. Keep the <Role>, "
-    "<Task>, <Terms>, <MustRedact>, <DoNotRedact> and <Examples> XML sections, with one "
-    "'- ' bullet per clause, and add no text outside them. Keep the [T1]-style clause "
-    "labels, renumbering them in order within each section if clauses are added or "
-    "removed. Do not add clauses that contradict a DoNotRedact clause or PINS guidance, "
-    "and keep the prompt concise. Do not describe the response format, such as one term "
-    "per line or what to omit: a response schema already enforces it."
+    "Inspectorate (PINS) casework published online under UK GDPR. "
+    + PROMPT_FORMAT_RULES
 )
+# GEPA's default reflection prompt plus the format rules. It must keep the <curr_param>
+# and <side_info> placeholders and ask for the result in ``` blocks, which GEPA extracts.
+GEPA_REFLECTION_TEMPLATE = f"""I provided an assistant with the following instructions to perform a task for me:
+```
+<curr_param>
+```
+
+The following are examples of different task inputs provided to the assistant along with the assistant's response for each of them, and some feedback on how the assistant's response could be better:
+```
+<side_info>
+```
+
+Your task is to write a new instruction for the assistant.
+
+Read the inputs carefully and identify the input format and infer detailed task description about the task I wish to solve with the assistant.
+
+Read all the assistant responses and the corresponding feedback. Identify all niche and domain specific factual information about the task and include it in the instruction, as a lot of it may not be available to the assistant in the future. The assistant may have utilized a generalizable strategy to solve the task, if so, include that in the instruction as well.
+
+The instruction is a system prompt for finding text to redact from UK Planning Inspectorate casework. Edit it in place rather than rewriting it from scratch. {GEPA_FORMAT_RULES}
+
+Provide the new instructions within ``` blocks, without any other ``` marks inside them."""
 
 
 def setup_mlflow(tracking_uri: str):
@@ -278,7 +313,10 @@ def cmd_optimise(args: argparse.Namespace):
             reflection_model=args.reflection_model,
             max_metric_calls=args.max_metric_calls,
             display_progress_bar=True,
-            gepa_kwargs={"valset": val_records} if val_records else None,
+            gepa_kwargs={
+                "reflection_prompt_template": GEPA_REFLECTION_TEMPLATE,
+                **({"valset": val_records} if val_records else {}),
+            },
         )
     else:
         optimizer = MetaPromptOptimizer(
