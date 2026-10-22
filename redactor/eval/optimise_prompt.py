@@ -9,7 +9,7 @@ file for human review. Run from the `redactor` directory, inside the VNet:
     python -m eval.optimise_prompt evaluate --rule names --prompt baseline
     python -m eval.optimise_prompt optimise --rule names --optimizer meta
     python -m eval.optimise_prompt gate --rule names --candidate candidate --promote
-    python -m eval.optimise_prompt export --rule names --out src/config/optimised.yaml
+    python -m eval.optimise_prompt export --out src/config/optimised.yaml
 
 View results with ``mlflow ui --backend-store-uri sqlite:///eval/results/mlflow.db``.
 Traces include the corpus text, so only point this at synthetic or approved data.
@@ -48,7 +48,7 @@ from .mlflow_dataset import (
 from .mlflow_scorers import SCORERS, make_objective
 from .prompt_registry import (
     PromptStructureError,
-    export_rule_to_yaml,
+    export_rules_to_yaml,
     normalise_template,
     parse_prompt_sections,
     prompt_uri,
@@ -476,18 +476,34 @@ def cmd_gate(args: argparse.Namespace):
 
 
 def cmd_export(args: argparse.Namespace):
-    prompt = load_rule_prompt(args.rule, args.prompt)
-    try:
-        fields = parse_prompt_sections(prompt.template)
-    except PromptStructureError as e:
-        raise SystemExit(f"{prompt.uri} cannot be exported: {e}") from e
+    """Write the given prompt version (the champion by default) of each rule into one
+    copy of the config. Rules without that version are skipped unless named"""
+    rules = args.rules or list(RULE_NAMES)
+    fields_by_rule = {}
+    for rule in rules:
+        prompt = mlflow.genai.load_prompt(
+            prompt_uri(rule, args.prompt), allow_missing=True
+        )
+        if prompt is None:
+            if args.rules:
+                raise SystemExit(f"No '{args.prompt}' prompt for rule '{rule}'")
+            print(f"Skipping '{rule}': no '{args.prompt}' prompt")
+            continue
+        try:
+            fields_by_rule[rule] = parse_prompt_sections(prompt.template)
+        except PromptStructureError as e:
+            raise SystemExit(f"{prompt.uri} cannot be exported: {e}") from e
+        print(f"Exporting {prompt.uri} as rule '{rule}'")
+    if not fields_by_rule:
+        raise SystemExit(f"No rules have a '{args.prompt}' prompt to export")
+
     base = (
         Path(args.base)
         if args.base
         else Path(str(resources.files("src.config") / f"{args.config}.yaml"))
     )
-    export_rule_to_yaml(fields, args.rule, base, Path(args.out))
-    print(f"Wrote {prompt.uri} as rule '{args.rule}' to {args.out}")
+    export_rules_to_yaml(fields_by_rule, base, Path(args.out))
+    print(f"Wrote {len(fields_by_rule)} rule(s) to {args.out}")
 
 
 def parse_args(argv=None) -> argparse.Namespace:
@@ -611,8 +627,18 @@ def parse_args(argv=None) -> argparse.Namespace:
         parents=[common],
         help="Write a prompt version into a copy of a YAML config",
     )
-    export.add_argument("--rule", required=True, choices=RULE_NAMES)
-    export.add_argument("--prompt", default="champion", help="Alias or version")
+    export.add_argument(
+        "--rules",
+        "--rule",
+        nargs="+",
+        choices=RULE_NAMES,
+        help="Rules to export. Defaults to every rule that has the prompt",
+    )
+    export.add_argument(
+        "--prompt",
+        default="champion",
+        help="Alias (or version) to export for each rule",
+    )
     export.add_argument(
         "--base", help="YAML config to copy. Defaults to the --config file"
     )

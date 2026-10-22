@@ -9,12 +9,16 @@ from eval.corpus import RULE_NAMES
 from eval.prompt_registry import (
     PromptStructureError,
     export_rule_to_yaml,
+    export_rules_to_yaml,
     normalise_template,
     parse_prompt_sections,
     prompt_uri,
     register_rule_prompt,
 )
 from eval.run_chunk_sweep import load_rule_configs
+
+from src.redaction.config import LLMTextRedactionConfig
+from src.redaction.config_processor import ConfigProcessor
 
 DEFAULT_CONFIG = Path("src/config/default.yaml")
 
@@ -71,7 +75,7 @@ def test_parse_prompt_sections__multi_line_clause():
         (
             (
                 "<Role>\nr\n</Role>\n<Task>\nt\n</Task>\n<Terms>\n- a\n</Terms>\n"
-                "<Notes>\nn\n</Notes>"
+                "<notes>\nn\n</notes>"
             ),
             "Unknown",
         ),
@@ -115,6 +119,38 @@ def test_export_rule_to_yaml__unknown_rule(tmp_path):
 
     with pytest.raises(KeyError):
         export_rule_to_yaml(fields, "not_a_rule", DEFAULT_CONFIG, tmp_path / "x.yaml")
+
+
+def test_export_rules_to_yaml__replaces_each_rule(tmp_path):
+    names = parse_prompt_sections(_detailed_template("names"))
+    names["redaction_terms"] = ["A new names term"]
+    sensitive = parse_prompt_sections(_detailed_template("sensitive_info"))
+    sensitive["redaction_terms"] = ["A new sensitive term"]
+    out = tmp_path / "optimised.yaml"
+
+    export_rules_to_yaml(
+        {"names": names, "sensitive_info": sensitive}, DEFAULT_CONFIG, out
+    )
+
+    exported = yaml.safe_load(out.read_text(encoding="utf-8"))
+    original = yaml.safe_load(DEFAULT_CONFIG.read_text(encoding="utf-8"))
+    rules = {r["name"]: r for r in exported["redactors"][0]["redaction_rules"]}
+    original_rules = {r["name"]: r for r in original["redactors"][0]["redaction_rules"]}
+    assert rules["names"]["redaction_terms"] == ["A new names term"]
+    assert rules["sensitive_info"]["redaction_terms"] == ["A new sensitive term"]
+    assert rules["contact_identity_info"] == original_rules["contact_identity_info"]
+
+
+def test_export_rules_to_yaml__writes_nothing_if_any_rule_fails(tmp_path):
+    fields = parse_prompt_sections(_detailed_template("names"))
+    out = tmp_path / "x.yaml"
+
+    with pytest.raises(KeyError):
+        export_rules_to_yaml(
+            {"names": fields, "not_a_rule": fields}, DEFAULT_CONFIG, out
+        )
+
+    assert not out.exists()
 
 
 def test_register_rule_prompt(tracking_uri):
@@ -171,3 +207,79 @@ def test_normalise_template__unparseable():
 
     with pytest.raises(PromptStructureError):
         normalise_template("Just some text", config)
+
+
+_WITH_EXTRA_SECTION = (
+    "<Role>\nr\n</Role>\n\n<Task>\nt\n</Task>\n\n<Terms>\n- [T1] a\n</Terms>\n\n"
+    "<EdgeCases>\n- first case\n  continued\n- [X2] second case\n</EdgeCases>"
+)
+
+
+def test_parse_prompt_sections__extra_sections():
+    """Non-standard CamelCase sections are parsed, without bullet labels, by tag"""
+    fields = parse_prompt_sections(_WITH_EXTRA_SECTION)
+
+    assert fields["extra_sections"] == {
+        "EdgeCases": ["first case\n  continued", "second case"]
+    }
+
+
+def test_parse_prompt_sections__repeated_extra_section():
+    template = _WITH_EXTRA_SECTION + "\n<EdgeCases>\n- again\n</EdgeCases>"
+
+    with pytest.raises(PromptStructureError, match="more than once"):
+        parse_prompt_sections(template)
+
+
+def test_normalise_template__keeps_extra_sections_unlabelled():
+    config = load_rule_configs("default", ["names"])["names"]
+
+    assert normalise_template(_WITH_EXTRA_SECTION, config) == (
+        "<Role>\nr\n</Role>\n\n<Task>\nt\n</Task>\n\n<Terms>\n- [T1] a\n</Terms>\n\n"
+        "<EdgeCases>\n- first case\n  continued\n- second case\n</EdgeCases>"
+    )
+
+
+def test_export_rule_to_yaml__extra_sections_round_trip(tmp_path):
+    """
+    - Given a prompt with an extra section
+    - When I export it, and build a prompt from the exported rule
+    - Then the exported YAML holds the section and the prompt matches the original
+    """
+    config = load_rule_configs("default", ["names"])["names"]
+    fields = parse_prompt_sections(normalise_template(_WITH_EXTRA_SECTION, config))
+    out = tmp_path / "optimised.yaml"
+
+    export_rule_to_yaml(fields, "names", DEFAULT_CONFIG, out)
+
+    exported = yaml.safe_load(out.read_text(encoding="utf-8"))
+    rule = exported["redactors"][0]["redaction_rules"][0]
+    assert rule["extra_sections"] == {
+        "EdgeCases": ["first case\n  continued", "second case"]
+    }
+    rebuilt = next(
+        c
+        for c in ConfigProcessor.validate_and_parse_redaction_config(exported)
+        if c.name == "names" and type(c) is LLMTextRedactionConfig
+    ).model_copy(update={"include_rationale": True})
+    assert rebuilt.create_system_prompt() == normalise_template(
+        _WITH_EXTRA_SECTION, config
+    )
+
+
+def test_export_rule_to_yaml__drops_removed_extra_sections(tmp_path):
+    """Exporting fields without extra sections removes ones the base config had"""
+    base = tmp_path / "base.yaml"
+    config = yaml.safe_load(DEFAULT_CONFIG.read_text(encoding="utf-8"))
+    config["redactors"][0]["redaction_rules"][0]["extra_sections"] = {"Old": ["x"]}
+    base.write_text(yaml.dump(config), encoding="utf-8")
+    out = tmp_path / "out.yaml"
+
+    export_rule_to_yaml(
+        parse_prompt_sections(_detailed_template("names")), "names", base, out
+    )
+
+    rule = yaml.safe_load(out.read_text(encoding="utf-8"))["redactors"][0][
+        "redaction_rules"
+    ][0]
+    assert "extra_sections" not in rule

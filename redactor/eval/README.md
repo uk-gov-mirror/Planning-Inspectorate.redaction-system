@@ -142,5 +142,6 @@ so only use synthetic or approved data. The YAML config stays the source of trut
 4. `gate --rule names --promote` runs both prompts over whole test documents and sets
    `@champion` only if F2 is significantly better (paired bootstrap) without more
    hard-negative hits.
-5. `export --rule names --out src/config/<name>.yaml` writes the champion into a copy of the
-   config for review against PINS guidance.
+5. `export --out src/config/<name>.yaml` writes every rule's champion into one copy of the
+   config for review against PINS guidance. Rules without a champion are skipped. Use
+   `--rules names` to export only some rules, or `--prompt candidate` for another alias.

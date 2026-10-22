@@ -303,3 +303,39 @@ def test_cmd_reregister__command_line_overrides_and_deletes_the_original():
     assert new.model_config["extra_params"]["chunk_overlap"] == 0
     with pytest.raises(mlflow.exceptions.MlflowException):
         mlflow.genai.load_prompt(edited.uri)
+
+
+def _export_args(tmp_path, *extra_args):
+    return optimise_prompt.parse_args(
+        ["export", "--out", str(tmp_path / "out.yaml"), *extra_args]
+    )
+
+
+def test_export__exports_every_champion(tmp_path, capsys):
+    """
+    - Given a champion for names and sensitive_info only
+    - When I export without naming rules
+    - Then both are written to one file and the other rules are skipped
+    """
+    for rule in ("names", "sensitive_info"):
+        rule_config = optimise_prompt.load_rule_configs("default", [rule])[rule]
+        register_rule_prompt(rule_config, "default", alias="champion")
+
+    optimise_prompt.cmd_export(_export_args(tmp_path))
+
+    out = capsys.readouterr().out
+    assert "Skipping 'contact_identity_info'" in out
+    assert "Wrote 2 rule(s)" in out
+    assert (tmp_path / "out.yaml").exists()
+
+
+def test_export__named_rule_without_champion_fails(tmp_path):
+    with pytest.raises(SystemExit, match="No 'champion' prompt for rule 'names'"):
+        optimise_prompt.cmd_export(_export_args(tmp_path, "--rule", "names"))
+
+    assert not (tmp_path / "out.yaml").exists()
+
+
+def test_export__no_champions_fails(tmp_path):
+    with pytest.raises(SystemExit, match="No rules have a 'champion' prompt"):
+        optimise_prompt.cmd_export(_export_args(tmp_path))
