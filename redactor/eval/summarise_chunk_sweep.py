@@ -440,6 +440,11 @@ def best_variant(
     return max(candidates, key=lambda v: summaries[(v, rule)].counts.f_beta(beta))
 
 
+def overlap_ratio(variant: Variant) -> float:
+    """Chunk overlap as a fraction of the chunk size"""
+    return round(variant[1] / variant[0], 3)
+
+
 def plot_f_beta_vs_cost(
     summaries: dict[tuple[Variant, str], VariantSummary],
     rule: str,
@@ -450,14 +455,14 @@ def plot_f_beta_vs_cost(
     variants = sorted(v for v, r in summaries if r == rule)
     if not variants:
         return
-    overlaps = sorted({overlap for _, overlap in variants})
+    ratios = sorted({overlap_ratio(v) for v in variants})
 
     fig, ax = plt.subplots(figsize=(7, 5))
-    for overlap in overlaps:
-        series = [v for v in variants if v[1] == overlap]
+    for ratio in ratios:
+        series = [v for v in variants if overlap_ratio(v) == ratio]
         costs = [summaries[(v, rule)].cost_per_1k_doc_tokens for v in series]
         scores = [summaries[(v, rule)].counts.f_beta(beta) for v in series]
-        ax.plot(costs, scores, marker="o", label=f"overlap={overlap}")
+        ax.plot(costs, scores, marker="o", label=f"overlap_ratio={ratio:g}")
         for v, cost, score in zip(series, costs, scores):
             ax.annotate(
                 str(v[0]),
@@ -488,7 +493,7 @@ def plot_metrics_vs_chunk_size(
     variants = sorted(v for v, r in summaries if r == rule)
     if not variants:
         return
-    overlaps = sorted({overlap for _, overlap in variants})
+    ratios = sorted({overlap_ratio(v) for v in variants})
 
     metrics = [
         ("precision", lambda s: s.counts.precision),
@@ -504,13 +509,13 @@ def plot_metrics_vs_chunk_size(
     ]
     fig, axes = plt.subplots(2, 5, figsize=(22, 8))
     for ax, (name, metric) in zip(axes.flat, metrics):
-        for overlap in overlaps:
-            series = sorted(v for v in variants if v[1] == overlap)
+        for ratio in ratios:
+            series = sorted(v for v in variants if overlap_ratio(v) == ratio)
             sizes = [v[0] for v in series]
             values = [metric(summaries[(v, rule)]) for v in series]
             if all(value is None for value in values):
                 continue
-            ax.plot(sizes, values, marker="o", label=f"overlap={overlap}")
+            ax.plot(sizes, values, marker="o", label=f"overlap_ratio={ratio:g}")
         ax.set_xlabel("chunk_size")
         ax.set_title(name)
         ax.grid(True, alpha=0.3)
