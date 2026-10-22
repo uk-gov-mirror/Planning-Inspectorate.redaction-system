@@ -16,12 +16,16 @@ Traces include the corpus text, so only point this at synthetic or approved data
 """
 
 import argparse
+import json
 import os
+import warnings
+from dataclasses import asdict
 from importlib import resources
 from pathlib import Path
 
 import litellm
 import mlflow
+import pandas as pd
 from azure.core.exceptions import ClientAuthenticationError
 from azure.identity import (
     AzureCliCredential,
@@ -33,7 +37,7 @@ from mlflow.genai.optimize import GepaPromptOptimizer, MetaPromptOptimizer
 
 from src.redaction.config import LLMTextRedactionConfig
 
-from .corpus import RULE_NAMES, load_corpus
+from .corpus import RULE_NAMES, Document, load_corpus
 from .mlflow_dataset import (
     PromptRunner,
     chunk_records,
@@ -88,6 +92,8 @@ def setup_mlflow(tracking_uri: str):
     mlflow.set_experiment(EXPERIMENT_NAME)
     # Predict functions are traced explicitly, so skip the check that spends an LLM call
     os.environ["MLFLOW_GENAI_EVAL_SKIP_TRACE_VALIDATION"] = "true"
+    # Autologging serialises parse() responses, whose generic `parsed` type is unresolved
+    warnings.filterwarnings("ignore", message="Pydantic serializer warnings")
     mlflow.openai.autolog()
 
 
@@ -320,6 +326,25 @@ def cmd_optimise(args: argparse.Namespace):
         print(f"Warning: {layout_warning}")
 
 
+def corpus_dataset(documents: list[Document], corpus: str, split: str):
+    """The documents as an MLflow dataset. The digest changes if any text or label does,
+    so runs on different corpus versions can be told apart"""
+    frame = pd.DataFrame(
+        {
+            "doc_id": [d.id for d in documents],
+            "doc_type": [d.doc_type for d in documents],
+            "split": [d.split for d in documents],
+            "text": [d.text for d in documents],
+            "entities": [
+                json.dumps([asdict(e) for e in d.entities]) for d in documents
+            ],
+        }
+    )
+    return mlflow.data.from_pandas(
+        frame, source=corpus, name=f"{Path(corpus).stem}-{split}"
+    )
+
+
 def cmd_gate(args: argparse.Namespace):
     """Compare whole-document results of a candidate and a reference prompt, and pass
     if the candidate's F2 is significantly better without more hard-negative hits"""
@@ -342,6 +367,9 @@ def cmd_gate(args: argparse.Namespace):
             reference_prompt_uri=prompts["reference"].uri,
             repeats=args.repeats,
             documents=len(documents),
+        )
+        mlflow.log_input(
+            corpus_dataset(documents, args.corpus, args.split), context="gate"
         )
         scored = []
         for repeat in range(args.repeats):

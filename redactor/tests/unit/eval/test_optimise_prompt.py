@@ -132,6 +132,18 @@ def test_gate__passes_and_promotes(tmp_path, capsys):
     assert run["metrics.candidate_f2"] == 1.0
 
 
+def test_gate__logs_the_corpus_as_a_dataset(tmp_path):
+    _gate(tmp_path, "redaction-names")
+
+    run_id = mlflow.search_runs(experiment_names=["Default"]).iloc[0]["run_id"]
+    [dataset_input] = mlflow.get_run(run_id).inputs.dataset_inputs
+    assert dataset_input.dataset.name == "corpus-test"
+    assert dataset_input.dataset.digest
+    assert [t.value for t in dataset_input.tags if t.key == "mlflow.data.context"] == [
+        "gate"
+    ]
+
+
 def test_gate__fails_when_not_better(tmp_path, capsys):
     """A candidate identical to the reference is not significantly better"""
     mock_set_alias = _gate(tmp_path, "reference", "--promote")
