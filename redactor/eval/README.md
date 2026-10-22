@@ -6,6 +6,9 @@ positives and false negatives low, and keep token costs down. Everything here ca
 directly on plain text. PDFs and the Function App are not involved, so the effect of chunking
 is isolated. None of it runs in CI.
 
+See [METHODOLOGY.md](METHODOLOGY.md) for the statistical design: metrics, variance, sample
+sizes, the bootstrap and the prompt-optimisation gate.
+
 The Azure OpenAI resource is private-endpoint only, so anything that calls the LLM must run
 from inside the VNet (e.g. a pipeline agent or a VM on the network).
 
