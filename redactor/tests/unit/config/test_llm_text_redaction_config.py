@@ -158,3 +158,18 @@ def test_llm_text_redactor__create_system_prompt_only_required_fields():
     actual_system_prompt = config.create_system_prompt()
 
     assert expected_system_prompt == actual_system_prompt
+
+
+def test_llm_text_redaction_config__optional_sections_survive_a_round_trip():
+    """A config without the optional sections can be rebuilt from its own dump, as
+    the prompt tooling does to apply overrides"""
+    config = _create_config()
+
+    rebuilt = LLMTextRedactionConfig(**(config.model_dump() | {"chunk_size": 4500}))
+
+    assert (rebuilt.must_redact, rebuilt.do_not_redact, rebuilt.examples) == (
+        None,
+        None,
+        None,
+    )
+    assert rebuilt.chunk_size == 4500

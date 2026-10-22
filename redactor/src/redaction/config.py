@@ -31,11 +31,11 @@ class LLMTextRedactionConfigBase(RedactionConfig, LLMTextAnalyserConfig):
     to apply it consistently"""
     redaction_terms: list[str]
     """A list of redaction rule strings to apply"""
-    must_redact: list[str] = None
+    must_redact: list[str] | None = None
     """A list of additional rules clarifying what must be redacted"""
-    do_not_redact: list[str] = None
+    do_not_redact: list[str] | None = None
     """A list of exceptions/exclusions describing what must never be redacted"""
-    examples: list[str] = None
+    examples: list[str] | None = None
     """A list of worked examples illustrating correct redaction decisions for
     ambiguous cases"""
     chunk_size: int = Field(1500, gt=0)
