@@ -5,6 +5,7 @@ config stays the source of truth: a prompt that passes the gate is exported to a
 file for human review. Run from the `redactor` directory, inside the VNet:
 
     python -m eval.optimise_prompt register --chunk-size 1500 --chunk-overlap 60
+    python -m eval.optimise_prompt reregister --rule names --prompt my-edit --alias candidate
     python -m eval.optimise_prompt evaluate --rule names --prompt baseline
     python -m eval.optimise_prompt optimise --rule names --optimizer meta
     python -m eval.optimise_prompt gate --rule names --candidate candidate --promote
@@ -188,14 +189,17 @@ def reregister_optimised(
     config_name: str,
     optimizer: str,
     alias: str | None,
+    commit_message: str | None = None,
+    delete_original: bool = True,
 ) -> tuple[PromptVersion, str | None]:
     """
     Replace the version the optimiser registered with one that has the rule's tags,
     structured output and model config, and the template in the standard layout.
 
-    Prompt versions are immutable, so this registers a new version and deletes the
-    optimiser's. If the template can't be parsed into sections it is kept as it is, and
-    a warning is returned, since such a version cannot be exported to YAML either.
+    Prompt versions are immutable, so this registers a new version and, unless
+    `delete_original` is False, deletes the optimiser's. If the template can't be
+    parsed into sections it is kept as it is, and a warning is returned, since such a
+    version cannot be exported to YAML either.
 
     :return: The new version and a warning, if any.
     """
@@ -207,13 +211,40 @@ def reregister_optimised(
     version = register_rule_prompt(
         config,
         config_name,
-        commit_message=f"{optimizer} optimisation of {source.uri}",
+        commit_message=commit_message or f"{optimizer} optimisation of {source.uri}",
         alias=alias,
         template=template,
         extra_tags={"optimizer": optimizer, "source_prompt": source.uri},
     )
-    mlflow.MlflowClient().delete_prompt_version(optimised.name, optimised.version)
+    if delete_original:
+        mlflow.MlflowClient().delete_prompt_version(optimised.name, optimised.version)
     return version, warning
+
+
+def cmd_reregister(args: argparse.Namespace):
+    """Re-register a prompt, e.g. one edited in the MLflow UI, with the rule's tags,
+    structured output and chunk settings copied from another version"""
+    prompt = load_rule_prompt(args.rule, args.prompt)
+    like = load_rule_prompt(args.rule, args.like)
+    config = rule_config(args, args.rule, like)
+    version, warning = reregister_optimised(
+        prompt,
+        prompt,
+        config,
+        args.config,
+        "manual",
+        args.alias,
+        commit_message=args.message or f"Re-registered {prompt.uri}",
+        delete_original=args.delete_original,
+    )
+    print(
+        f"Registered {version.uri}"
+        + (f" as @{args.alias}" if args.alias else "")
+        + f" from {prompt.uri} with the chunk settings of {like.uri}"
+        f" ({config.chunk_size}/{config.chunk_overlap})"
+    )
+    if warning:
+        print(f"Warning: {warning}")
 
 
 def cmd_optimise(args: argparse.Namespace):
@@ -421,6 +452,31 @@ def parse_args(argv=None) -> argparse.Namespace:
     register.add_argument("--alias", default="baseline")
     register.add_argument("--message", help="Commit message for the new versions")
     register.set_defaults(func=cmd_register)
+
+    reregister = subparsers.add_parser(
+        "reregister",
+        parents=[common, settings],
+        help="Re-register a prompt, e.g. one edited in the MLflow UI, with the "
+        "rule's tags, structured output and chunk settings",
+    )
+    reregister.add_argument("--rule", required=True, choices=RULE_NAMES)
+    reregister.add_argument(
+        "--prompt", required=True, help="Alias or version to re-register"
+    )
+    reregister.add_argument(
+        "--like",
+        default="baseline",
+        help="Alias or version whose chunk and completion settings are copied. "
+        "The settings above override them",
+    )
+    reregister.add_argument("--alias", help="Alias to set on the new version")
+    reregister.add_argument("--message", help="Commit message for the new version")
+    reregister.add_argument(
+        "--delete-original",
+        action="store_true",
+        help="Delete the version being re-registered",
+    )
+    reregister.set_defaults(func=cmd_reregister)
 
     evaluate = subparsers.add_parser(
         "evaluate", parents=[run], help="Score a prompt version with mlflow.genai"

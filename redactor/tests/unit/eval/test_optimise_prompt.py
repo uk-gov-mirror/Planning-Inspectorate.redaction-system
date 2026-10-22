@@ -219,3 +219,75 @@ def test_reregister_optimised__keeps_unparseable_template():
     loaded = mlflow.genai.load_prompt(version.uri)
     assert loaded.template == "Just some text"
     assert loaded.tags["rule"] == "names"
+
+
+def _hand_edited_version(source):
+    """A version made in the MLflow UI: a template, and no tags or chunk settings"""
+    return mlflow.genai.register_prompt(
+        name=source.name,
+        template="<Role>\nR.\n</Role> <Task>\nT.\n</Task>\n<Terms>\n- x\n</Terms>",
+        model_config={"provider": "openai", "model_name": "gpt-5.6-luna"},
+    )
+
+
+def _reregister_args(source, edited, *extra):
+    return optimise_prompt.parse_args(
+        ["reregister", "--rule", "names", "--prompt", str(edited.version), *extra]
+    )
+
+
+def test_cmd_reregister__copies_the_chunk_settings_of_another_version(capsys):
+    """
+    - Given a hand-edited version with no chunk settings, and a baseline at 4500/450
+    - When I re-register it
+    - Then the new version has the baseline's chunk settings, the rule's tags, the
+      standard layout and the alias, and the hand-edited version is kept
+    """
+    config, _ = _register_source()
+    baseline = register_rule_prompt(
+        config.model_copy(update={"chunk_size": 4500, "chunk_overlap": 450}),
+        "default",
+        alias="baseline",
+    )
+    edited = _hand_edited_version(baseline)
+
+    optimise_prompt.cmd_reregister(
+        _reregister_args(baseline, edited, "--alias", "candidate-reformatted")
+    )
+
+    loaded = mlflow.genai.load_prompt("prompts:/redaction-names@candidate-reformatted")
+    assert loaded.version not in (baseline.version, edited.version)
+    assert loaded.model_config["extra_params"]["chunk_size"] == 4500
+    assert loaded.model_config["extra_params"]["chunk_overlap"] == 450
+    assert loaded.tags["rule"] == "names"
+    assert loaded.tags["optimizer"] == "manual"
+    assert loaded.tags["source_prompt"] == edited.uri
+    assert loaded.template == (
+        "<Role>\nR.\n</Role>\n\n<Task>\nT.\n</Task>\n\n<Terms>\n- [T1] x\n</Terms>"
+    )
+    assert mlflow.genai.load_prompt(edited.uri).version == edited.version
+    assert "chunk settings of" in capsys.readouterr().out
+
+
+def test_cmd_reregister__command_line_overrides_and_deletes_the_original():
+    config, _ = _register_source()
+    baseline = register_rule_prompt(config, "default", alias="baseline")
+    edited = _hand_edited_version(baseline)
+
+    optimise_prompt.cmd_reregister(
+        _reregister_args(
+            baseline,
+            edited,
+            "--chunk-size",
+            "3000",
+            "--chunk-overlap",
+            "0",
+            "--delete-original",
+        )
+    )
+
+    new = mlflow.genai.load_prompt("prompts:/redaction-names@latest")
+    assert new.model_config["extra_params"]["chunk_size"] == 3000
+    assert new.model_config["extra_params"]["chunk_overlap"] == 0
+    with pytest.raises(mlflow.exceptions.MlflowException):
+        mlflow.genai.load_prompt(edited.uri)
