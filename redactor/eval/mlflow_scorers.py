@@ -13,6 +13,7 @@ from mlflow.genai.scorers import scorer
 
 from .corpus import Document, Entity
 from .scoring import (
+    BETA,
     HARD_NEGATIVE_WEIGHT,
     UNLOCATABLE_WEIGHT,
     DocumentWords,
@@ -25,7 +26,6 @@ from .scoring import (
 )
 
 COVERAGE_THRESHOLD = 0.8
-BETA = 2.0
 
 
 def _document(inputs: dict, expectations: dict) -> Document:

@@ -1,3 +1,4 @@
+import csv
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -6,7 +7,7 @@ from azure.core.exceptions import ClientAuthenticationError
 
 mlflow = pytest.importorskip("mlflow")
 
-from eval import optimise_prompt
+from eval import azure_auth, optimise_prompt
 from eval.corpus import Document, Entity, write_corpus
 from eval.prompt_registry import register_rule_prompt
 
@@ -158,7 +159,7 @@ def test_main__stops_before_running_if_azure_auth_fails(command):
 
     with (
         patch.object(optimise_prompt, "setup_mlflow"),
-        patch.object(optimise_prompt, "ChainedTokenCredential") as mock_credential,
+        patch.object(azure_auth, "ChainedTokenCredential") as mock_credential,
         patch.object(optimise_prompt, f"cmd_{command}") as mock_command,
     ):
         mock_credential.return_value.get_token.side_effect = error
@@ -172,7 +173,7 @@ def test_main__skips_azure_check_for_commands_without_llm_calls():
     with (
         patch.object(optimise_prompt, "setup_mlflow"),
         patch.object(optimise_prompt, "cmd_export") as mock_export,
-        patch.object(optimise_prompt, "ChainedTokenCredential") as mock_credential,
+        patch.object(azure_auth, "ChainedTokenCredential") as mock_credential,
     ):
         optimise_prompt.main(["export", "--rule", "names", "--out", "x.yaml"])
 
@@ -339,3 +340,110 @@ def test_export__named_rule_without_champion_fails(tmp_path):
 def test_export__no_champions_fails(tmp_path):
     with pytest.raises(SystemExit, match="No rules have a 'champion' prompt"):
         optimise_prompt.cmd_export(_export_args(tmp_path))
+
+
+def _log_gate_run(rule, version, passed=1.0, repeats=2, candidate_f2=0.95):
+    """Log a gate run as cmd_gate does, for the given candidate version"""
+    mlflow.set_experiment(optimise_prompt.EXPERIMENT_NAME)
+    with mlflow.start_run(run_name=f"gate-{rule}-candidate-vs-baseline"):
+        mlflow.log_params(
+            {
+                "rule": rule,
+                "prompt_uri": f"prompts:/redaction-{rule}/{version}",
+                "reference_prompt_uri": f"prompts:/redaction-{rule}/1",
+                "documents": 30,
+                "repeats": repeats,
+            }
+        )
+        metrics = {"f2_diff_ci_low": 0.01, "f2_diff_ci_high": 0.1, "passed": passed}
+        for side, f2 in (("reference", 0.9), ("candidate", candidate_f2)):
+            metrics |= {
+                f"{side}_f2": f2,
+                f"{side}_recall": f2,
+                f"{side}_precision": f2,
+                f"{side}_hard_negative_fp_rate": 0.0,
+                f"{side}_cost_gbp": 0.1,
+            }
+        mlflow.log_metrics(metrics)
+
+
+@pytest.fixture
+def gates_experiment():
+    """The experiment setup_mlflow creates, in the test's tracking store"""
+    mlflow.set_experiment(optimise_prompt.EXPERIMENT_NAME)
+
+
+def _gates_summary(*args):
+    optimise_prompt.cmd_gates_summary(
+        optimise_prompt.parse_args(["gates-summary", *args])
+    )
+
+
+def _set_champion(rule, version):
+    """Register versions up to `version` of a rule's prompt and make the last champion"""
+    config = optimise_prompt.load_rule_configs("default", [rule])[rule]
+    for _ in range(version):
+        registered = register_rule_prompt(config, "default")
+    mlflow.genai.set_prompt_alias(registered.name, "champion", registered.version)
+
+
+def test_gates_summary__uses_the_latest_passing_run_of_each_champion(
+    gates_experiment, tmp_path, capsys
+):
+    """
+    - Given champions for two rules, one of which also has an earlier failed gate run
+      of its champion and a passing run of a different version
+    - When I run gates-summary
+    - Then each row comes from the latest passing run of its champion's version
+    """
+    _set_champion("names", 2)
+    _set_champion("sensitive_info", 1)
+    _log_gate_run("names", 2, passed=0.0, candidate_f2=0.91)
+    _log_gate_run("names", 1, candidate_f2=0.92)
+    _log_gate_run("names", 2, repeats=3, candidate_f2=0.96)
+    _log_gate_run("sensitive_info", 1, candidate_f2=0.97)
+    out_dir = tmp_path / "gates"
+
+    _gates_summary("--out-dir", str(out_dir))
+
+    with (out_dir / "gates_summary.csv").open(encoding="utf-8") as f:
+        rows = {r["rule"]: r for r in csv.DictReader(f)}
+    assert set(rows) == {"names", "sensitive_info"}
+    assert rows["names"]["champion"] == "prompts:/redaction-names/2"
+    assert rows["names"]["repeats"] == "3"
+    assert float(rows["names"]["candidate_f2"]) == 0.96
+    assert float(rows["names"]["f2_diff"]) == pytest.approx(0.06)
+    assert (out_dir / "gates_summary.png").stat().st_size > 0
+    out = capsys.readouterr().out
+    assert "Skipping 'contact_identity_info': no champion" in out
+
+
+def test_gates_summary__skips_champion_without_a_passing_gate_run(
+    gates_experiment, tmp_path, capsys
+):
+    _set_champion("names", 1)
+    _log_gate_run("names", 1, passed=0.0)
+    _set_champion("sensitive_info", 1)
+    _log_gate_run("sensitive_info", 1)
+
+    _gates_summary("--rules", "names", "sensitive_info", "--out-dir", str(tmp_path))
+
+    assert "Skipping 'names': no passing gate run" in capsys.readouterr().out
+    with (tmp_path / "gates_summary.csv").open(encoding="utf-8") as f:
+        assert [r["rule"] for r in csv.DictReader(f)] == ["sensitive_info"]
+
+
+def test_gates_summary__no_champions_fails(gates_experiment, tmp_path):
+    with pytest.raises(SystemExit, match="No rules have a champion"):
+        _gates_summary("--out-dir", str(tmp_path))
+
+
+def test_main__gates_summary_makes_no_llm_calls(tmp_path):
+    with (
+        patch.object(azure_auth, "ChainedTokenCredential") as mock_credential,
+        patch.object(optimise_prompt, "cmd_gates_summary") as mock_summary,
+    ):
+        optimise_prompt.main(["gates-summary"])
+
+    mock_credential.assert_not_called()
+    mock_summary.assert_called_once()

@@ -154,6 +154,7 @@ def f_beta(precision: float, recall: float, beta: float = 2.0) -> float:
 
 
 # Judgement defaults, not fitted to data
+BETA = 2.0
 HARD_NEGATIVE_WEIGHT = 0.5
 UNLOCATABLE_WEIGHT = 0.25
 
