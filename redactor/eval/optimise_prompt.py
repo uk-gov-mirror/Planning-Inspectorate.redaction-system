@@ -71,6 +71,8 @@ DEFAULT_TRACKING_URI = f"sqlite:///{RESULTS_DIR.as_posix()}/mlflow.db"
 AZURE_API_VERSION = "2024-12-01-preview"
 LLM_COMMANDS = ("evaluate", "optimise", "gate")
 UNIT_RANGE_METRICS = ("f2", "recall", "precision")
+DEFAULT_SUMMARY_CANDIDATE = "champion"
+DEFAULT_SUMMARY_REFERENCE = "baseline"
 GATE_METRICS = {
     "f2": "F2",
     "recall": "Recall",
@@ -517,55 +519,96 @@ def cmd_export(args: argparse.Namespace):
     print(f"Wrote {len(fields_by_rule)} rule(s) to {args.out}")
 
 
-def champion_gate_rows(rules: list[str]) -> list[dict]:
+def gate_summary_rows(
+    rules: list[str],
+    candidate: str = DEFAULT_SUMMARY_CANDIDATE,
+    reference: str = DEFAULT_SUMMARY_REFERENCE,
+    include_failed: bool = False,
+) -> list[dict]:
     """
-    The latest passing gate run of each rule's current champion, as a flat row of its
-    logged parameters and metrics. Rules without a champion, or without a passing gate
-    run for it, are skipped with a message.
+    The latest gate run of each rule's `candidate` prompt against its `reference` prompt
+    (each an alias or version), as a flat row of its logged parameters and metrics. Only
+    passing runs are used unless `include_failed`. Rules without both prompts, or without
+    a matching run, are skipped with a message.
     """
+    filter_string = "tags.mlflow.runName LIKE 'gate-%'"
+    if not include_failed:
+        filter_string += " AND metrics.passed = 1"
     runs = mlflow.search_runs(
         experiment_names=[EXPERIMENT_NAME],
-        filter_string="tags.mlflow.runName LIKE 'gate-%' AND metrics.passed = 1",
+        filter_string=filter_string,
         order_by=["start_time DESC"],
         output_format="list",
     )
     rows = []
     for rule in rules:
-        champion = mlflow.genai.load_prompt(
-            prompt_uri(rule, "champion"), allow_missing=True
-        )
-        if champion is None:
-            print(f"Skipping '{rule}': no champion")
-            continue
-        uri = prompt_uri(rule, str(champion.version))
-        run = next((r for r in runs if r.data.params.get("prompt_uri") == uri), None)
-        if run is None:
-            print(f"Skipping '{rule}': no passing gate run for {uri}")
-            continue
-        metrics, params = run.data.metrics, run.data.params
-        row = {
-            "rule": rule,
-            "champion": uri,
-            "reference": params["reference_prompt_uri"],
-            "run_id": run.info.run_id,
-            "documents": int(params["documents"]),
-            "repeats": int(params["repeats"]),
-            "f2_diff_ci_low": metrics["f2_diff_ci_low"],
-            "f2_diff_ci_high": metrics["f2_diff_ci_high"],
+        uris = {
+            role: _version_uri(rule, ref)
+            for role, ref in (("candidate", candidate), ("reference", reference))
         }
-        for metric in GATE_METRICS:
-            for side in ("reference", "candidate"):
-                row[f"{side}_{metric}"] = metrics[f"{side}_{metric}"]
-        row["f2_diff"] = row["candidate_f2"] - row["reference_f2"]
-        rows.append(row)
+        if missing := [
+            ref
+            for ref, role in ((candidate, "candidate"), (reference, "reference"))
+            if uris[role] is None
+        ]:
+            print(f"Skipping '{rule}': no '{missing[0]}' prompt")
+            continue
+        run = next(
+            (
+                r
+                for r in runs
+                if r.data.params.get("prompt_uri") == uris["candidate"]
+                and r.data.params.get("reference_prompt_uri") == uris["reference"]
+            ),
+            None,
+        )
+        if run is None:
+            print(
+                f"Skipping '{rule}': no {'' if include_failed else 'passing '}gate run "
+                f"of {uris['candidate']} against {uris['reference']}"
+            )
+            continue
+        rows.append(_gate_summary_row(rule, uris, run))
     return rows
 
 
-def plot_gates_summary(rows: list[dict], out_path: Path, title: str = ""):
-    """Save a forest plot of the F2 difference with its 95% interval, and a baseline to
-    champion chart for each metric, with a row per rule"""
+def _version_uri(rule: str, ref: str) -> str | None:
+    """The URI of the version an alias (or version number) of a rule's prompt points to"""
+    prompt = mlflow.genai.load_prompt(prompt_uri(rule, ref), allow_missing=True)
+    return None if prompt is None else prompt_uri(rule, str(prompt.version))
+
+
+def _gate_summary_row(rule: str, uris: dict[str, str], run) -> dict:
+    metrics, params = run.data.metrics, run.data.params
+    row = {
+        "rule": rule,
+        "candidate": uris["candidate"],
+        "reference": uris["reference"],
+        "run_id": run.info.run_id,
+        "passed": bool(metrics["passed"]),
+        "documents": int(params["documents"]),
+        "repeats": int(params["repeats"]),
+        "f2_diff_ci_low": metrics["f2_diff_ci_low"],
+        "f2_diff_ci_high": metrics["f2_diff_ci_high"],
+    }
+    for metric in GATE_METRICS:
+        for side in ("reference", "candidate"):
+            row[f"{side}_{metric}"] = metrics[f"{side}_{metric}"]
+    row["f2_diff"] = row["candidate_f2"] - row["reference_f2"]
+    return row
+
+
+def plot_gates_summary(
+    rows: list[dict],
+    out_path: Path,
+    title: str = "",
+    candidate: str = DEFAULT_SUMMARY_CANDIDATE,
+    reference: str = DEFAULT_SUMMARY_REFERENCE,
+):
+    """Save a forest plot of the F2 difference with its 95% interval, and a reference to
+    candidate chart for each metric, with a row per rule. Failed gates are drawn red"""
     labels = [
-        f"{row['rule'].replace('_', ' ')}\n(v{row['champion'].rsplit('/', 1)[-1]})"
+        f"{row['rule'].replace('_', ' ')}\n(v{row['candidate'].rsplit('/', 1)[-1]})"
         for row in rows
     ]
     y = np.arange(len(rows))[::-1]
@@ -575,9 +618,15 @@ def plot_gates_summary(rows: list[dict], out_path: Path, title: str = ""):
     diffs = np.array([row["f2_diff"] for row in rows])
     low = np.array([row["f2_diff_ci_low"] for row in rows])
     high = np.array([row["f2_diff_ci_high"] for row in rows])
-    forest.errorbar(
-        diffs, y, xerr=[diffs - low, high - diffs], fmt="o", capsize=4, color="C0"
-    )
+    for row, yi, diff, lo, hi in zip(rows, y, diffs, low, high):
+        forest.errorbar(
+            diff,
+            yi,
+            xerr=[[diff - lo], [hi - diff]],
+            fmt="o",
+            capsize=4,
+            color="C0" if row["passed"] else "C3",
+        )
     forest.axvline(0, color="black", linewidth=1, linestyle="--")
     for yi, lo, hi in zip(y, low, high):
         forest.annotate(
@@ -588,7 +637,11 @@ def plot_gates_summary(rows: list[dict], out_path: Path, title: str = ""):
             va="center",
             fontsize=7,
         )
-    forest.set_title("F2 difference, champion - baseline (95% CI)", fontsize=10)
+    forest.set_title(
+        f"F2 difference, {candidate} - {reference} (95% CI)"
+        + ("" if all(row["passed"] for row in rows) else ", red = gate failed"),
+        fontsize=10,
+    )
     forest.margins(x=0.3)
 
     # Metrics in [0, 1] share a range ending at 1, and the rest start at 0, so
@@ -604,10 +657,8 @@ def plot_gates_summary(rows: list[dict], out_path: Path, title: str = ""):
         for yi, row in zip(y, rows):
             before, after = row[f"reference_{metric}"], row[f"candidate_{metric}"]
             ax.plot([before, after], [yi, yi], color="grey", zorder=1)
-            ax.scatter(
-                before, yi, color="C1", zorder=2, label="baseline", clip_on=False
-            )
-            ax.scatter(after, yi, color="C2", zorder=2, label="champion", clip_on=False)
+            ax.scatter(before, yi, color="C1", zorder=2, label=reference, clip_on=False)
+            ax.scatter(after, yi, color="C2", zorder=2, label=candidate, clip_on=False)
         ax.set_title(label, fontsize=10)
         if metric in unit_metrics:
             ax.set_xlim(max(0, unit_left - 0.02), 1.0)
@@ -628,14 +679,31 @@ def plot_gates_summary(rows: list[dict], out_path: Path, title: str = ""):
 
 
 def cmd_gates_summary(args: argparse.Namespace):
-    """Save a plot and table of each rule's champion against the baseline it was gated
-    on, from the logged gate runs, so no LLM calls are made"""
-    rows = champion_gate_rows(args.rules or list(RULE_NAMES))
+    """Save a plot and table of each rule's candidate prompt against its reference
+    prompt, from the logged gate runs, so no LLM calls are made"""
+    rows = gate_summary_rows(
+        args.rules or list(RULE_NAMES),
+        args.candidate,
+        args.reference,
+        args.include_failed,
+    )
     if not rows:
-        raise SystemExit("No rules have a champion with a passing gate run")
+        raise SystemExit(
+            f"No rules have a gate run of '{args.candidate}' against '{args.reference}'"
+        )
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
-    table_path, plot_path = out_dir / "gates_summary.csv", out_dir / "gates_summary.png"
+    defaults = (args.candidate, args.reference) == (
+        DEFAULT_SUMMARY_CANDIDATE,
+        DEFAULT_SUMMARY_REFERENCE,
+    )
+    # Other pairs get their own files, so they do not overwrite the default summary
+    stem = (
+        "gates_summary"
+        if defaults
+        else f"gates_summary_{args.candidate}_vs_{args.reference}"
+    )
+    table_path, plot_path = out_dir / f"{stem}.csv", out_dir / f"{stem}.png"
     with table_path.open("w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=list(rows[0]))
         writer.writeheader()
@@ -643,14 +711,23 @@ def cmd_gates_summary(args: argparse.Namespace):
             {k: round(v, 5) if isinstance(v, float) else v for k, v in row.items()}
             for row in rows
         )
-    plot_gates_summary(rows, plot_path, "Promoted champion of each rule vs baseline")
+    plot_gates_summary(
+        rows,
+        plot_path,
+        "Promoted champion of each rule vs baseline"
+        if defaults
+        else f"{args.candidate} vs {args.reference}: latest gate run of each rule",
+        args.candidate,
+        args.reference,
+    )
 
     for row in rows:
         print(
-            f"{row['rule']} {row['champion']}: F2 {row['reference_f2']:.3f} -> "
+            f"{row['rule']} {row['candidate']}: F2 {row['reference_f2']:.3f} -> "
             f"{row['candidate_f2']:.3f} (95% CI {row['f2_diff_ci_low']:+.3f} to "
             f"{row['f2_diff_ci_high']:+.3f}, {row['documents']} documents, "
-            f"{row['repeats']} repeats)"
+            f"{row['repeats']} repeats"
+            f"{'' if row['passed'] else ', gate failed'})"
         )
     print(f"Wrote {table_path} and {plot_path}")
 
@@ -796,9 +873,24 @@ def parse_args(argv=None) -> argparse.Namespace:
 
     gates_summary = subparsers.add_parser(
         "gates-summary",
-        help="Plot each rule's promoted champion against its baseline from the gates",
+        help="Plot each rule's candidate prompt against a reference from the gates",
     )
     gates_summary.add_argument("--tracking-uri", default=DEFAULT_TRACKING_URI)
+    gates_summary.add_argument(
+        "--candidate",
+        default=DEFAULT_SUMMARY_CANDIDATE,
+        help="Alias or version of the prompt that was gated",
+    )
+    gates_summary.add_argument(
+        "--reference",
+        default=DEFAULT_SUMMARY_REFERENCE,
+        help="Alias or version of the prompt it was gated against",
+    )
+    gates_summary.add_argument(
+        "--include-failed",
+        action="store_true",
+        help="Also use gate runs that failed, not only passing ones",
+    )
     gates_summary.add_argument(
         "--rules",
         nargs="+",
@@ -808,7 +900,8 @@ def parse_args(argv=None) -> argparse.Namespace:
     gates_summary.add_argument(
         "--out-dir",
         default=str(RESULTS_DIR / "gates"),
-        help="Where gates_summary.png and gates_summary.csv go",
+        help="Where gates_summary.png and gates_summary.csv go (with the aliases in "
+        "their names unless they are the defaults)",
     )
     gates_summary.set_defaults(func=cmd_gates_summary)
 
