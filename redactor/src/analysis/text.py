@@ -34,10 +34,45 @@ from tenacity import (
 from tiktoken import get_encoding
 
 from ..monitoring import LoggingUtil, TimerUtil, log_to_appins
-from ..types import LLMRedactionResultFormat, LLMTextRedactionResult
+from ..types import (
+    CONFIDENCE_RANK,
+    LLMDetailedRedactionResultFormat,
+    LLMRedactionResultFormat,
+    LLMTextRedactionResult,
+)
 from .utils import TokenSemaphore, get_max_workers
 
 load_dotenv(verbose=True)
+
+
+def merge_redaction_decisions(
+    parsed_responses: list[LLMDetailedRedactionResultFormat],
+) -> tuple[tuple[dict, ...], tuple[dict, ...]]:
+    """Combine per-chunk decisions into one per span, keeping the highest confidence
+    and every cited clause. Exclusions of spans redacted elsewhere are dropped,
+    since every occurrence of a redaction string is redacted"""
+    redactions: dict[str, dict] = {}
+    exclusions: dict[str, dict] = {}
+    for parsed in parsed_responses:
+        for decision in parsed.redactions:
+            merged = redactions.get(decision.text)
+            if merged is None:
+                redactions[decision.text] = decision.model_dump() | {"chunk_count": 1}
+                continue
+            merged["chunk_count"] += 1
+            merged["clause_ids"] = list(
+                dict.fromkeys(merged["clause_ids"] + decision.clause_ids)
+            )
+            if (
+                CONFIDENCE_RANK[decision.confidence]
+                > CONFIDENCE_RANK[merged["confidence"]]
+            ):
+                merged["confidence"] = decision.confidence
+        for exclusion in parsed.excluded:
+            exclusions.setdefault(exclusion.text, exclusion.model_dump())
+    return tuple(redactions.values()), tuple(
+        e for text, e in exclusions.items() if text not in redactions
+    )
 
 
 @log_to_appins
@@ -72,6 +107,9 @@ class LLMTextAnalyserConfig(BaseModel):
     """Maximum number of tokens per completion, including reasoning tokens"""
     reasoning_effort: Literal["minimal", "low", "medium", "high"] | None = None
     """Reasoning effort for reasoning models. None uses the model's default"""
+    include_rationale: bool = False
+    """Ask the LLM for a reason, clause IDs and confidence for each redaction. This
+    uses more completion tokens, so consider raising max_tokens"""
     request_rate_limit: int | None = None
     """Maximum number of requests per minute. Defaults to 20% of model max RPM."""
     token_rate_limit: int | None = None
@@ -352,18 +390,30 @@ class LLMTextAnalyser:
                 LoggingUtil().log_info(
                     f"{chunk_hash_string} The following messages were sent to the LLM: {api_messages}"
                 )
-                response = self.invoke_chain(
-                    api_messages, LLMRedactionResultFormat, max_completion_tokens
+                response_format = (
+                    LLMDetailedRedactionResultFormat
+                    if self.config.include_rationale
+                    else LLMRedactionResultFormat
                 )
-                LoggingUtil().log_info(
-                    f"{chunk_hash_string} LLM response received: {response}"
+                response = self.invoke_chain(
+                    api_messages, response_format, max_completion_tokens
                 )
                 usage = response.usage
 
-                response_cleaned: LLMRedactionResultFormat = response.choices[
-                    0
-                ].message.parsed
+                response_cleaned: (
+                    LLMRedactionResultFormat | LLMDetailedRedactionResultFormat
+                ) = response.choices[0].message.parsed
                 redaction_strings = response_cleaned.redaction_strings
+                if self.config.include_rationale:
+                    # Decisions quote personal data, so keep them out of App Insights
+                    LoggingUtil().log_info(
+                        f"{chunk_hash_string} LLM response received: redaction "
+                        f"strings {redaction_strings}, usage {usage}"
+                    )
+                else:
+                    LoggingUtil().log_info(
+                        f"{chunk_hash_string} LLM response received: {response}"
+                    )
                 return response, redaction_strings
             except LengthFinishReasonError as lfe:
                 LoggingUtil().log_exception_with_message(
@@ -534,6 +584,13 @@ class LLMTextAnalyser:
 
             # Remove duplicates
             text_to_redact_cleaned = tuple(dict.fromkeys(text_to_redact))
+            redaction_decisions, excluded_decisions = (
+                merge_redaction_decisions(
+                    [response.choices[0].message.parsed for response in responses]
+                )
+                if self.config.include_rationale
+                else ((), ())
+            )
 
         # Collect metrics
         metadata = LLMTextRedactionResult.LLMResultMetadata(
@@ -559,6 +616,8 @@ class LLMTextAnalyser:
             run_metrics=run_metrics,
             redaction_strings=text_to_redact_cleaned,
             metadata=metadata,
+            redaction_decisions=redaction_decisions,
+            excluded_decisions=excluded_decisions,
         )
 
         return result

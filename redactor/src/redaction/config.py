@@ -90,30 +90,48 @@ class LLMTextRedactionConfigBase(RedactionConfig, LLMTextAnalyserConfig):
 
 class LLMTextRedactionConfig(TextRedactionConfig, LLMTextRedactionConfigBase):
     def create_system_prompt(self) -> str:
+        def clause_ids(prefix: str) -> str | None:
+            # Detailed responses cite these IDs to say which clause drove a decision
+            return prefix if self.include_rationale else None
+
         system_prompt_list: list[str] = []
         # Add the role, task and redaction_terms to redact
         system_prompt_list.append(xml_format(self.role, "Role"))
         system_prompt_list.append(xml_format(self.task, "Task"))
         system_prompt_list.append(
-            xml_format(self.redaction_terms, "Terms", as_list=True)
+            xml_format(
+                self.redaction_terms, "Terms", as_list=True, id_prefix=clause_ids("T")
+            )
         )
 
         # Add any rules clarifying what must be redacted
         if self.must_redact:
             system_prompt_list.append(
-                xml_format(self.must_redact, "MustRedact", as_list=True)
+                xml_format(
+                    self.must_redact,
+                    "MustRedact",
+                    as_list=True,
+                    id_prefix=clause_ids("M"),
+                )
             )
 
         # Add any exceptions/exclusions describing what must never be redacted
         if self.do_not_redact:
             system_prompt_list.append(
-                xml_format(self.do_not_redact, "DoNotRedact", as_list=True)
+                xml_format(
+                    self.do_not_redact,
+                    "DoNotRedact",
+                    as_list=True,
+                    id_prefix=clause_ids("D"),
+                )
             )
 
         # Add any worked examples
         if self.examples:
             system_prompt_list.append(
-                xml_format(self.examples, "Examples", as_list=True)
+                xml_format(
+                    self.examples, "Examples", as_list=True, id_prefix=clause_ids("E")
+                )
             )
 
         # Add any further sections, in the order given
@@ -130,10 +148,21 @@ class LLMTextRedactionConfig(TextRedactionConfig, LLMTextRedactionConfigBase):
         return system_prompt_template.format()
 
 
-def xml_format(input: str | list, format_string: str, as_list: bool = False) -> str:
-    """Wrap the input string in XML tags of the given format string"""
+def xml_format(
+    input: str | list,
+    format_string: str,
+    as_list: bool = False,
+    id_prefix: str | None = None,
+) -> str:
+    """Wrap the input string in XML tags of the given format string. List items are
+    labelled [<id_prefix>1], [<id_prefix>2], ... when id_prefix is given"""
     if isinstance(input, list):
-        if as_list:
+        if as_list and id_prefix:
+            joined_input = "\n".join(
+                f"- [{id_prefix}{i}] {x[1:].lstrip() if x.startswith('-') else x}"
+                for i, x in enumerate(input, start=1)
+            )
+        elif as_list:
             joined_input = "\n".join(
                 ["- " + x if not x.startswith("-") else x for x in input]
             )

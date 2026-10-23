@@ -171,6 +171,8 @@ class LLMTextRedactor(TextRedactor):
             run_metrics=llm_redaction_result.run_metrics,
             redaction_strings=tuple(llm_redaction_result.redaction_strings),
             metadata=llm_redaction_result.metadata,
+            redaction_decisions=llm_redaction_result.redaction_decisions,
+            excluded_decisions=llm_redaction_result.excluded_decisions,
         )
 
     def redact(self) -> LLMTextRedactionResult:

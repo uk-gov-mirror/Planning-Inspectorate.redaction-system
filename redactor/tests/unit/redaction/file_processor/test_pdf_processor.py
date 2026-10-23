@@ -8,6 +8,7 @@ import pytest
 from PIL import Image
 
 from src.analysis.images import AzureImageAnalyser
+from src.monitoring import LoggingUtil
 from src.redaction.file_processor import NonEnglishContentException, PDFProcessor
 from src.redaction.utils.pdf import (
     PDFImageMetadata,
@@ -19,6 +20,7 @@ from src.redaction.utils.text import get_normalised_words, is_english_text
 from src.types import (
     ImageLLMTextRedactionResult,
     ImageRedactionResult,
+    LLMTextRedactionResult,
     TextRedactionResult,
 )
 from tests.utils import (
@@ -1094,3 +1096,62 @@ class TestApply:
         assert run_metrics["redaction_time"] >= 0
         assert run_metrics["scrub_time"] >= 0
         assert run_metrics["n_highlights"] >= 0
+
+
+class TestApplyRuleDecisions:
+    def test_decisions_in_summary_but_not_logs(self):
+        """
+        - Given an LLM rule that returns redaction decisions
+        - When I apply the rule
+        - Then the decisions are in the text redaction summary but not in the logs
+        """
+        decision = {
+            "text": "Joan Brown",
+            "data_subject": "third_party",
+            "clause_ids": ["T1"],
+            "reason": "uninvolved neighbour",
+            "confidence": "high",
+            "chunk_count": 1,
+        }
+        exclusion = {
+            "text": "Cllr Raj Patel",
+            "clause_ids": ["D3"],
+            "reason": "councillor",
+        }
+        result = LLMTextRedactionResult(
+            rule_name="names",
+            run_metrics={},
+            redaction_strings=("Joan Brown",),
+            redaction_decisions=(decision,),
+            excluded_decisions=(exclusion,),
+        )
+        processor = PDFProcessor()
+        processor.run_metrics = {"text_analysis_total_time": 0.0}
+        processor._text_redaction_summary = {}
+        processor.redaction_results = []
+
+        processor._apply_rule(Mock(redact=Mock(return_value=result)))
+
+        summary = processor._text_redaction_summary["names"]
+        assert summary["redaction_decisions"] == (decision,)
+        assert summary["excluded_decisions"] == (exclusion,)
+        logged = " ".join(str(c) for c in LoggingUtil.log_info.call_args_list)
+        assert "uninvolved neighbour" not in logged
+        assert "Cllr Raj Patel" not in logged
+
+    def test_no_decisions_leaves_summary_unchanged(self):
+        result = LLMTextRedactionResult(
+            rule_name="names", run_metrics={}, redaction_strings=("Joan Brown",)
+        )
+        processor = PDFProcessor()
+        processor.run_metrics = {"text_analysis_total_time": 0.0}
+        processor._text_redaction_summary = {}
+        processor.redaction_results = []
+
+        processor._apply_rule(Mock(redact=Mock(return_value=result)))
+
+        assert processor._text_redaction_summary["names"] == {
+            "redaction_strings": ("Joan Brown",),
+            "n_proposed": 1,
+            "n_applied": 1,
+        }

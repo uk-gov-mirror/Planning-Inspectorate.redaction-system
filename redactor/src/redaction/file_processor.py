@@ -18,6 +18,7 @@ from ..analysis import AzureImageAnalyser
 from ..monitoring import LoggingUtil, MetricUtil, TimerUtil, log_to_appins
 from ..types import (
     ImageRedactionResult,
+    LLMTextRedactionResult,
     RedactionResult,
     TextRedactionResult,
 )
@@ -683,17 +684,28 @@ class PDFProcessor(FileProcessor):
 
         if issubclass(redaction_result.__class__, TextRedactionResult):
             self.run_metrics["text_analysis_total_time"] += redaction_time
-            self._text_redaction_summary[redaction_result.rule_name] = {
+            summary = {
                 "redaction_strings": redaction_strings,
                 "n_proposed": n_strings,
                 "n_applied": n_strings,
             }
+            if isinstance(redaction_result, LLMTextRedactionResult) and (
+                redaction_result.redaction_decisions
+                or redaction_result.excluded_decisions
+            ):
+                summary["redaction_decisions"] = redaction_result.redaction_decisions
+                summary["excluded_decisions"] = redaction_result.excluded_decisions
+            self._text_redaction_summary[redaction_result.rule_name] = summary
         elif issubclass(redaction_result.__class__, ImageRedactionResult):
             self.run_metrics["image_analysis_total_time"] += redaction_time
 
+        loggable_result = dataclasses.asdict(redaction_result)
+        # Decisions quote personal data, so keep them out of App Insights
+        loggable_result.pop("redaction_decisions", None)
+        loggable_result.pop("excluded_decisions", None)
         LoggingUtil().log_info(
             f"The redactor {rule} yielded the following result: "
-            f"{json.dumps(dataclasses.asdict(redaction_result), indent=4, default=str)}"
+            f"{json.dumps(loggable_result, indent=4, default=str)}"
         )
         self.redaction_results.append(redaction_result)
 

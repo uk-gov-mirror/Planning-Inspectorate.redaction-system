@@ -11,10 +11,14 @@ from src.analysis.text import (
     LLMTextAnalyser,
     LLMTextAnalyserConfig,
     handle_last_retry_error,
+    merge_redaction_decisions,
     update_max_tokens,
 )
 from src.monitoring import LoggingUtil
 from src.types import (
+    LLMDetailedRedactionResultFormat,
+    LLMExclusionDecision,
+    LLMRedactionDecision,
     LLMRedactionResultFormat,
     LLMTextRedactionResult,
 )
@@ -706,6 +710,176 @@ def test__llm_text_analyser__analyse_text():
     assert llm_text_analyser.input_token_count == 10
     assert llm_text_analyser.completion_token_count == 8
     assert llm_text_analyser.total_cost == 26.0
+
+
+def _decision(text, clause_ids=("T1",), confidence="high", reason="a reason"):
+    return LLMRedactionDecision(
+        text=text,
+        data_subject="third_party",
+        clause_ids=list(clause_ids),
+        reason=reason,
+        confidence=confidence,
+    )
+
+
+def _exclusion(text):
+    return LLMExclusionDecision(text=text, clause_ids=["D1"], reason="councillor")
+
+
+def create_mock_detailed_chat_completion(redactions, excluded=()):
+    return MockLLMChatCompletion(
+        choices=[
+            MockLLMChatCompletionChoice(
+                message=MockLLMChatCompletionChoiceMessage(
+                    parsed=LLMDetailedRedactionResultFormat(
+                        redactions=list(redactions), excluded=list(excluded)
+                    )
+                )
+            )
+        ],
+        usage=MockLLMChatCompletionUsage(prompt_tokens=5, completion_tokens=4),
+    )
+
+
+def test__merge_redaction_decisions():
+    """
+    - Given two chunks that both redact a span with different clauses and confidence
+    - When I merge their decisions
+    - Then there is one decision for the span with the highest confidence, every
+      clause, and the chunk count, and exclusions of redacted spans are dropped
+    """
+    first = LLMDetailedRedactionResultFormat(
+        redactions=[_decision("Joan Brown", ["T1"], "low", "first reason")],
+        excluded=[_exclusion("Cllr Raj Patel")],
+    )
+    second = LLMDetailedRedactionResultFormat(
+        redactions=[
+            _decision("Joan Brown", ["T1", "M2"], "high", "second reason"),
+            _decision("Mary Jones"),
+        ],
+        excluded=[_exclusion("Mary Jones")],
+    )
+
+    redactions, excluded = merge_redaction_decisions([first, second])
+
+    assert redactions == (
+        {
+            "text": "Joan Brown",
+            "data_subject": "third_party",
+            "clause_ids": ["T1", "M2"],
+            "reason": "first reason",
+            "confidence": "high",
+            "chunk_count": 2,
+        },
+        {
+            "text": "Mary Jones",
+            "data_subject": "third_party",
+            "clause_ids": ["T1"],
+            "reason": "a reason",
+            "confidence": "high",
+            "chunk_count": 1,
+        },
+    )
+    assert excluded == (
+        {"text": "Cllr Raj Patel", "clause_ids": ["D1"], "reason": "councillor"},
+    )
+
+
+@patch.object(
+    LLMTextAnalyser,
+    "create_api_message",
+    return_value=[{"role": "system", "content": "system prompt"}],
+)
+@patch.object(LLMTextAnalyser, "_num_tokens_consumed", return_value=10)
+def test__llm_text_analyser___analyse_text_chunk__include_rationale(
+    mock_num_tokens_consumed, mock_create_api_message
+):
+    """
+    - Given an analyser with include_rationale enabled
+    - When I analyse a chunk
+    - Then the detailed format is requested, the strings are returned, and the
+      decisions' reasons are not logged
+    """
+    completion = create_mock_detailed_chat_completion(
+        [_decision("Joan Brown", reason="uninvolved neighbour")],
+        [_exclusion("Cllr Raj Patel")],
+    )
+    llm_text_analyser = LLMTextAnalyser(
+        LLMTextAnalyserConfig(model="gpt-5.6-luna", include_rationale=True)
+    )
+    llm_text_analyser.request_semaphore = Mock()
+    llm_text_analyser.token_semaphore = Mock()
+
+    with patch.object(
+        LLMTextAnalyser, "invoke_chain", return_value=completion
+    ) as mock_invoke_chain:
+        response, redaction_strings = llm_text_analyser._analyse_text_chunk(
+            system_prompt="system prompt", user_prompt=""
+        )
+
+    assert mock_invoke_chain.call_args.args[1] is LLMDetailedRedactionResultFormat
+    assert response is completion
+    assert redaction_strings == ["Joan Brown"]
+    logged = " ".join(str(c) for c in LoggingUtil.log_info.call_args_list)
+    assert "uninvolved neighbour" not in logged
+    assert "Cllr Raj Patel" not in logged
+
+
+def test__llm_text_analyser__analyse_text__include_rationale():
+    """
+    - Given an analyser with include_rationale enabled
+    - When I analyse two chunks that both redact the same span
+    - Then the result has one merged decision for it alongside the strings
+    """
+    llm_text_analyser = LLMTextAnalyser(
+        LLMTextAnalyserConfig(model="gpt-5.6-luna", include_rationale=True)
+    )
+    results = iter(
+        [
+            (
+                create_mock_detailed_chat_completion([_decision("Joan Brown")]),
+                ["Joan Brown"],
+            ),
+            (
+                create_mock_detailed_chat_completion(
+                    [_decision("Joan Brown", confidence="low")],
+                    [_exclusion("Cllr Raj Patel")],
+                ),
+                ["Joan Brown"],
+            ),
+        ]
+    )
+
+    with patch.object(
+        LLMTextAnalyser,
+        "_analyse_text_chunk",
+        side_effect=lambda *args, **kwargs: next(results),
+    ):
+        actual_result = llm_text_analyser.analyse_text(
+            system_prompt="system prompt", text_chunks=["chunk A", "chunk B"]
+        )
+
+    assert actual_result.redaction_strings == ("Joan Brown",)
+    assert [d["text"] for d in actual_result.redaction_decisions] == ["Joan Brown"]
+    assert actual_result.redaction_decisions[0]["confidence"] == "high"
+    assert actual_result.redaction_decisions[0]["chunk_count"] == 2
+    assert [d["text"] for d in actual_result.excluded_decisions] == ["Cllr Raj Patel"]
+
+
+def test__llm_text_analyser__analyse_text__no_rationale_has_no_decisions():
+    llm_text_analyser = LLMTextAnalyser(LLMTextAnalyserConfig(model="gpt-5.6-luna"))
+
+    with patch.object(
+        LLMTextAnalyser,
+        "_analyse_text_chunk",
+        return_value=(create_mock_chat_completion(["string A"]), ["string A"]),
+    ):
+        actual_result = llm_text_analyser.analyse_text(
+            system_prompt="system prompt", text_chunks=["chunk A"]
+        )
+
+    assert actual_result.redaction_decisions == ()
+    assert actual_result.excluded_decisions == ()
 
 
 @patch.object(LLMTextAnalyser, "analyse_text", LLMTextAnalyser.analyse_text.__wrapped__)
