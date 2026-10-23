@@ -150,6 +150,7 @@ def run_task(
         "chunk_count": len(chunks),
         "max_completion_tokens": config.max_tokens,
         "reasoning_effort": config.reasoning_effort,
+        "include_rationale": config.include_rationale,
         "predictions": list(result.redaction_strings),
         "boundary_split": sorted(boundary_split_entities(document.entities, chunks)),
         "input_tokens": metadata.input_token_count,
@@ -162,6 +163,9 @@ def run_task(
         "failed_chunks": metadata.failed_chunk_count,
         "latency_s": round(latency, 3),
     }
+    if config.include_rationale:
+        row["decisions"] = list(result.redaction_decisions)
+        row["excluded"] = list(result.excluded_decisions)
     return row, logs
 
 
@@ -192,6 +196,11 @@ def run_sweep(args: argparse.Namespace):
     if args.reasoning_effort:
         rule_configs = {
             rule: config.model_copy(update={"reasoning_effort": args.reasoning_effort})
+            for rule, config in rule_configs.items()
+        }
+    if args.include_rationale:
+        rule_configs = {
+            rule: config.model_copy(update={"include_rationale": True})
             for rule, config in rule_configs.items()
         }
 
@@ -325,6 +334,12 @@ def parse_args(argv=None) -> argparse.Namespace:
         choices=["minimal", "low", "medium", "high"],
         help="Override the configured reasoning effort. Unset uses the config's value. "
         "Use a separate --out file per setting",
+    )
+    parser.add_argument(
+        "--include-rationale",
+        action="store_true",
+        help="Ask for a reason, clause IDs and confidence per redaction, and write "
+        "them to each row. This changes the prompt, so use a separate --out file",
     )
     parser.add_argument(
         "--max-workers",
