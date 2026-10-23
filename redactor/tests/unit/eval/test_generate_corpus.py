@@ -1,6 +1,7 @@
 from unittest.mock import patch
 
 import pytest
+from eval import generate_corpus
 from eval.generate_corpus import (
     MIN_SECTION_TOKENS,
     PROFILES,
@@ -11,8 +12,6 @@ from eval.generate_corpus import (
     GeneratedSection,
     parse_length_buckets,
 )
-
-from eval import generate_corpus
 
 
 def test_parse_length_buckets():
