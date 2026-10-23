@@ -184,6 +184,6 @@ class ConfigProcessor:
         # Resolved via the installed `src.config` package so this works whether
         # running from source or from an installed wheel/site-packages copy.
         config_resource = resources.files("src.config") / f"{config_name}.yaml"
-        with config_resource.open("r") as f:
+        with config_resource.open("r", encoding="utf-8") as f:
             config = safe_load(f)
         return config
