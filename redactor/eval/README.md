@@ -148,16 +148,17 @@ so only use synthetic or approved data. The YAML config stays the source of trut
 5. `export --out src/config/<name>.yaml` writes every rule's champion into one copy of the
    config for review against PINS guidance. Rules without a champion are skipped. Use
    `--rules names` to export only some rules, or `--prompt candidate` for another alias.
-6. `compare --configs basic default optimised` runs each config in `src/config` over the test
-   split (resumable, one row per document, repeat and rule, in `eval/results/compare/`) and
-   saves `comparison.png` and `comparison.csv`. They show F2, recall, precision, hard-negative
-   hit rate, unlocatable rate, cost per 1,000 document tokens and the objective for each rule
-   and for all rules together. Every config runs at the same chunk settings (the config
-   defaults, or `--chunk-size` and `--chunk-overlap`), and counts are pooled over documents
-   and repeats, as in the gate. `--plot-only` re-scores and re-plots existing results with no
-   LLM calls, e.g. after changing `--hard-negative-weight` or `--unlocatable-weight`.
-7. `gates-summary` reads the logged gate runs and plots each rule's promoted champion against
+6. `gates-summary` reads the logged gate runs and plots each rule's promoted champion against
    its baseline, with no LLM calls: the F2 difference with its 95% interval, and baseline vs
    champion for F2, recall, precision, hard-negative hit rate and gate cost. For each rule it
    uses the latest passing gate run of the version `@champion` points to. It saves
    `gates_summary.png` and `gates_summary.csv` in `eval/results/gates/`.
+7. `python -m eval.compare_prompts --configs basic default optimised` runs each config in 
+   `src/config` over the test split (resumable, one row per document, repeat and rule, in 
+   `eval/results/compare/`) and saves `comparison.png` and `comparison.csv`. They show F2, 
+   recall, precision, hard-negative hit rate, unlocatable rate, cost per 1,000 document 
+   tokens and the objective for each rule and for all rules together. Every config runs 
+   at the same chunk settings (the config defaults, or `--chunk-size` and `--chunk-overlap`), 
+   and counts are pooled over documents and repeats, as in the gate. `--plot-only` 
+   re-scores and re-plots existing results with no LLM calls, e.g. after changing 
+   `--hard-negative-weight` or `--unlocatable-weight`.
