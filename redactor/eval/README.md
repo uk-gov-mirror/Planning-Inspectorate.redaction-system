@@ -124,7 +124,9 @@ Run all commands from the `redactor` directory.
 - `summary.csv` and `recommendation.json` are joined by plots in the same `--out-dir`:
   `{rule}_f_beta_vs_cost.png` (the F-beta/cost trade-off per overlap) and
   `{rule}_metrics.png` (precision, recall, F-beta, hard-negative FP rate, boundary recall,
-  consistency, variance and cost against chunk size).
+  consistency, variance and cost against chunk size, one line per overlap ratio).
+  `{rule}_metrics_by_overlap.png` shows the same metrics against overlap ratio, with one
+  line per chunk size, coloured from smallest to largest.
 
 Keep the prompts frozen for the whole sweep. Changing a prompt invalidates the comparison.
 

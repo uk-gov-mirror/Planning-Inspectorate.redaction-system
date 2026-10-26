@@ -118,6 +118,65 @@ def test_select_variant__applies_recall_floor():
     assert any("recall" in r for r in reasons[(1500, 60)])
 
 
+def _grid_summaries():
+    runs = []
+    for variant in [(500, 20), (500, 50), (1500, 60), (1500, 150)]:
+        for doc in range(3):
+            runs.append(_run(variant, f"d{doc}", tp=9, positives=10, cost=1.0))
+    return summarise(runs)
+
+
+def test_plot_metrics_vs_overlap_ratio__one_coloured_line_per_chunk_size(tmp_path):
+    """
+    - Given variants of two chunk sizes, each at two overlap ratios
+    - When I plot the metrics against overlap ratio
+    - Then each panel has one line per chunk size, with distinct colours, over the
+      ratios, and the image is written
+    """
+    figures = []
+    out_path = tmp_path / "by_overlap.png"
+
+    with patch.object(summarise_chunk_sweep.plt, "close", side_effect=figures.append):
+        summarise_chunk_sweep.plot_metrics_vs_overlap_ratio(
+            _grid_summaries(), ALL_RULES, 2.0, out_path
+        )
+
+    assert out_path.exists()
+    lines = figures[0].axes[0].get_lines()
+    assert [line.get_label() for line in lines] == ["chunk_size=500", "chunk_size=1500"]
+    assert [list(line.get_xdata()) for line in lines] == [[0.04, 0.1], [0.04, 0.1]]
+    assert lines[0].get_color() != lines[1].get_color()
+    assert figures[0].axes[0].get_xlabel() == "overlap_ratio"
+
+
+def test_plot_metrics_vs_chunk_size__still_one_line_per_overlap(tmp_path):
+    figures = []
+
+    with patch.object(summarise_chunk_sweep.plt, "close", side_effect=figures.append):
+        summarise_chunk_sweep.plot_metrics_vs_chunk_size(
+            _grid_summaries(), ALL_RULES, 2.0, tmp_path / "by_size.png"
+        )
+
+    lines = figures[0].axes[0].get_lines()
+    assert [line.get_label() for line in lines] == [
+        "overlap_ratio=0.04",
+        "overlap_ratio=0.1",
+    ]
+    assert [list(line.get_xdata()) for line in lines] == [[500, 1500], [500, 1500]]
+
+
+def test_plot_variant_summary__writes_both_metric_plots(tmp_path):
+    summarise_chunk_sweep.plot_variant_summary(
+        _grid_summaries(), tmp_path, 2.0, [ALL_RULES]
+    )
+
+    assert {p.name for p in tmp_path.iterdir()} == {
+        f"{ALL_RULES}_f_beta_vs_cost.png",
+        f"{ALL_RULES}_metrics.png",
+        f"{ALL_RULES}_metrics_by_overlap.png",
+    }
+
+
 def test_summarise__consistency_across_repeats():
     runs = [
         _run((500, 20), "d0", tp=2, positives=2, cost=1, repeat=0),

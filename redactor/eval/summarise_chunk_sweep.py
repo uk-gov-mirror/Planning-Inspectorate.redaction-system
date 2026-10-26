@@ -25,6 +25,7 @@ import argparse
 import csv
 import json
 from collections import defaultdict
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -481,21 +482,10 @@ def plot_f_beta_vs_cost(
     plt.close(fig)
 
 
-def plot_metrics_vs_chunk_size(
-    summaries: dict[tuple[Variant, str], VariantSummary],
-    rule: str,
+def _metric_definitions(
     beta: float,
-    out_path: Path,
-) -> None:
-    """Plot precision, recall, hard-negative FP rate, boundary recall, consistency
-    and failed-chunk rate against chunk size, one line per overlap.
-    """
-    variants = sorted(v for v, r in summaries if r == rule)
-    if not variants:
-        return
-    ratios = sorted({overlap_ratio(v) for v in variants})
-
-    metrics = [
+) -> list[tuple[str, Callable[[VariantSummary], float | None]]]:
+    return [
         ("precision", lambda s: s.counts.precision),
         ("recall", lambda s: s.counts.recall),
         (f"f{beta:g}", lambda s: s.counts.f_beta(beta)),
@@ -507,23 +497,103 @@ def plot_metrics_vs_chunk_size(
         ("failed_chunk_rate", lambda s: s.failed_chunk_rate),
         ("cost_per_1k_doc_tokens", lambda s: s.cost_per_1k_doc_tokens),
     ]
+
+
+def _plot_metric_grid(
+    summaries: dict[tuple[Variant, str], VariantSummary],
+    rule: str,
+    beta: float,
+    out_path: Path,
+    *,
+    x_of: Callable[[Variant], float],
+    x_label: str,
+    group_of: Callable[[Variant], float],
+    group_label: str,
+    title: str,
+    gradient: bool = False,
+) -> None:
+    """Plot every metric in its own panel, one line per group of variants, against x.
+
+    :param gradient: Colour the lines along a gradient, in group order, rather than
+    with matplotlib's default colour cycle.
+    """
+    variants = sorted(v for v, r in summaries if r == rule)
+    if not variants:
+        return
+    groups = sorted({group_of(v) for v in variants})
+    colours = {
+        group: plt.get_cmap("viridis")(i / max(len(groups) - 1, 1))
+        for i, group in enumerate(groups)
+    }
+
     fig, axes = plt.subplots(2, 5, figsize=(22, 8))
-    for ax, (name, metric) in zip(axes.flat, metrics):
-        for ratio in ratios:
-            series = sorted(v for v in variants if overlap_ratio(v) == ratio)
-            sizes = [v[0] for v in series]
+    for ax, (name, metric) in zip(axes.flat, _metric_definitions(beta)):
+        for group in groups:
+            series = sorted((v for v in variants if group_of(v) == group), key=x_of)
             values = [metric(summaries[(v, rule)]) for v in series]
             if all(value is None for value in values):
                 continue
-            ax.plot(sizes, values, marker="o", label=f"overlap_ratio={ratio:g}")
-        ax.set_xlabel("chunk_size")
+            line_style = {"color": colours[group]} if gradient else {}
+            ax.plot(
+                [x_of(v) for v in series],
+                values,
+                marker="o",
+                label=f"{group_label}={group:g}",
+                **line_style,
+            )
+        ax.set_xlabel(x_label)
         ax.set_title(name)
         ax.grid(True, alpha=0.3)
     axes.flat[0].legend(fontsize=8)
-    fig.suptitle(f"Metrics vs chunk size - {rule}")
+    fig.suptitle(title)
     fig.tight_layout()
     fig.savefig(out_path)
     plt.close(fig)
+
+
+def plot_metrics_vs_chunk_size(
+    summaries: dict[tuple[Variant, str], VariantSummary],
+    rule: str,
+    beta: float,
+    out_path: Path,
+) -> None:
+    """Plot precision, recall, hard-negative FP rate, boundary recall, consistency
+    and failed-chunk rate against chunk size, one line per overlap.
+    """
+    _plot_metric_grid(
+        summaries,
+        rule,
+        beta,
+        out_path,
+        x_of=lambda v: v[0],
+        x_label="chunk_size",
+        group_of=overlap_ratio,
+        group_label="overlap_ratio",
+        title=f"Metrics vs chunk size - {rule}",
+    )
+
+
+def plot_metrics_vs_overlap_ratio(
+    summaries: dict[tuple[Variant, str], VariantSummary],
+    rule: str,
+    beta: float,
+    out_path: Path,
+) -> None:
+    """The same metrics as `plot_metrics_vs_chunk_size`, against overlap ratio, with
+    one line per chunk size coloured from the smallest to the largest size.
+    """
+    _plot_metric_grid(
+        summaries,
+        rule,
+        beta,
+        out_path,
+        x_of=overlap_ratio,
+        x_label="overlap_ratio",
+        group_of=lambda v: v[0],
+        group_label="chunk_size",
+        title=f"Metrics vs overlap ratio - {rule}",
+        gradient=True,
+    )
 
 
 def plot_variant_summary(
@@ -532,7 +602,7 @@ def plot_variant_summary(
     beta: float,
     rules: list[str],
 ) -> None:
-    """Save the F-beta-vs-cost and per-metric plots for each rule into out_dir"""
+    """Save the F-beta-vs-cost and both per-metric plots for each rule into out_dir"""
     for rule in rules:
         if not any(r == rule for _, r in summaries):
             continue
@@ -541,6 +611,9 @@ def plot_variant_summary(
         )
         plot_metrics_vs_chunk_size(
             summaries, rule, beta, out_dir / f"{rule}_metrics.png"
+        )
+        plot_metrics_vs_overlap_ratio(
+            summaries, rule, beta, out_dir / f"{rule}_metrics_by_overlap.png"
         )
 
 
@@ -578,7 +651,7 @@ def main(argv=None):
         ],
         help="rule=minimum recall pairs",
     )
-    parser.add_argument("--hard-negative-fp-ceiling", type=float, default=0.2)
+    parser.add_argument("--hard-negative-fp-ceiling", type=float, default=0.02)
     parser.add_argument("--max-failed-chunk-rate", type=float, default=0.01)
     parser.add_argument("--bootstrap-iterations", type=int, default=2000)
     args = parser.parse_args(argv)
