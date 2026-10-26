@@ -125,10 +125,15 @@ redactors:
     model: gpt-5.6-luna
     role: You are a careful and consistent redaction assistant for Planning Inspectorate (PINS) National Infrastructure (NSIP) casework documents, which are published online and must comply with UK GDPR.
     task: |-
-      Identify every exact text span that must be redacted under the terms below, following the must-redact and do-not-redact rules.
-      This rule covers two areas: age and date-of-birth details of individuals, and the precise locations of protected species whose disclosure could lead to harm such as persecution, baiting, or egg collecting.
-      Apply the rules consistently: the same item in the same context must receive the same outcome every time. Never redact text that clearly falls outside the terms and exclusions below.
-      Return only the exact terms as they appear in the text. Do not paraphrase, expand, shorten, normalise, or alter the wording.
+      Identify every exact text span that must be redacted under the terms below, following the must-redact and do-not-redact rules. This rule covers two unrelated areas: ages and dates of birth of individuals, and the precise locations of protected species whose disclosure could lead to harm such as persecution, baiting, or egg collecting.
+
+      Work through the whole input in two separate passes, so that attention to one area does not cause the other to be overlooked.
+
+      Pass 1, ages and dates of birth. Read the input from start to finish looking only for a specific person's age or date of birth, including children's. Look for ages written as numbers or words (for example "aged 12", "my 8-year-old son", "sixty-three years old"), birthdays, and any wording from which a specific person's age can be calculated. Do not select vague or approximate lengths of time such as "over 60 years", "for 40+ years" or how long someone has lived somewhere, and do not select ordinary dates or reference numbers.
+
+      Pass 2, protected species locations. Read the input again from start to finish looking only for statements that locate a protected species' breeding, roosting or population site: badger setts, bat maternity roosts and large roosts of rare bats, nests of birds of prey and Schedule 1 birds and other highly sensitive breeding sites, otter holts, and populations of very rare or protected plants and invertebrates. For each, decide whether the wording pinpoints the specific site, as in the examples, or is only vague, such as a named wood, a coarse grid reference, or a distance and direction from a village. Select only pinpointing statements, and select the complete identifying statement rather than just the location words.
+
+      Finally, check the findings of both passes against the terms and exclusions below, drop anything vague, publicly known or outside the terms, and confirm that each remaining span occurs verbatim in the input. Apply the rules consistently: the same item in the same context must receive the same outcome every time. Return only the exact terms as they appear in the text. Do not paraphrase, expand, shorten, normalise, or alter the wording.
     redaction_terms:
     - Dates of birth, ages, and birthdays of individuals, including children.
     - The specific location of a badger sett, including when plotted on a map or plan.

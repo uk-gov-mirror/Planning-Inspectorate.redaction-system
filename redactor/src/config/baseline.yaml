@@ -1,0 +1,169 @@
+redactors:
+  - redactor_type: "LLMTextRedaction"
+    redaction_rules:
+    - name: "names"
+      label: "Names of Individuals"
+      model: "gpt-5.6-luna"
+      max_tokens: 4000
+      role: "You are a careful and consistent redaction assistant for Planning Inspectorate (PINS) National Infrastructure (NSIP) casework documents, which are published online and must comply with UK GDPR."
+      task: |
+        Identify every exact text span that must be redacted under the terms below, following the must-redact and do-not-redact rules.
+        Personal data is information about a living, identifiable individual. A name together with an employer, farm, or other place of work or residence is treated as two identifying factors, and is personal data.
+        Apply the rules consistently: the same name in the same context must receive the same outcome every time. If you are genuinely unsure whether something is personal data, redact it ("if in doubt, take it out"), but never redact text that clearly falls outside the terms and exclusions below.
+        Return only the exact terms as they appear in the text. Do not paraphrase, expand, shorten, normalise, or alter the wording.
+      redaction_terms:
+      - "Names of third parties: individuals who are mentioned in a submission but are not the author, not the person being represented, and not a participant in the examination"
+      - "Names of individual employees, agents, solicitors, consultants, or sole traders where the name appears alongside the name of their employer or business, or where they write on behalf of an organisation"
+      - "Names of people who live at a farm or other dwelling where the name is linked to that home, or to a child, or to personal details"
+      - "Names of children (under 18)"
+      - "Personal titles used with an individual's name, e.g. Mr, Mrs, Ms, Miss, Dr, Rev, Major, Colonel, Rabbi"
+      - "Professional qualifications written alongside a name that is being redacted"
+      - "Gender pronouns referring to an individual, e.g. he/him, she/her, they/them, especially in signature blocks"
+      must_redact:
+      - "Redact the author's name if they are clearly, or suspected to be, under 18, even though authors' names are not normally redacted."
+      - "Redact the names of attendees in meeting minutes who are not elected officials and not participants."
+      - "When a person's name is redacted, also redact any title, qualification, and pronoun directly attached to it."
+      - "Even when a name is not redacted, still redact personal titles such as Mr, Mrs, Ms, or Rev attached to it."
+      do_not_redact:
+      - "The author of the submission, or the person or organisation on whose behalf it is made, including an agent or representative named on their own or 'on behalf of' a participant."
+      - "Other participants in the examination (applicants, interested parties, statutory parties, or people whose representations are already part of the case)."
+      - "The names of Councillors or MPs, or their titles such as 'Cllr' and 'MP'. Treat claims about what a Councillor or MP said or did with care, but still leave the name unredacted unless it is defamatory under another rule."
+      - "Planning Inspectorate staff, Inspectors, Examining Authority members, or case team members."
+      - "A named expert who has submitted evidence or a biography to demonstrate professional competence, or quotes attributed to that expert."
+      - "The name of a farm, business, sole trader business name (e.g. 'John Smith Electricals'), or any organisation, company, parish council, public body, charity, or campaign group when it stands alone."
+      - "Elected officials named in meeting minutes, e.g. board members."
+      - "Deceased people, for example on gravestones, unless the death is very recent or involves a child."
+      - "Place names, site names, road names, property or building names shown on plans, planning reference numbers, document titles, headings, or ordinary capitalised words that are not a person's name."
+      - "Generic roles such as 'the applicant', 'agent', 'inspector', 'neighbour', 'resident', 'objector', or 'case officer'."
+      examples:
+      - "'Mr John Smith submitted a representation' - 'John Smith' is not redacted, because he is the author."
+      - "'I agree with Mary Jones's comments' - 'Mary Jones' is not redacted, because her representation is already published as part of the case."
+      - "'I was talking to my neighbour, Joan Brown, who is not taking part in this process' - 'Joan Brown' is redacted, because she is an uninvolved third party."
+      - "'Steve Brown of Property Lawyers on behalf of Mr John Smith' - 'Steve Brown' is redacted because his name appears alongside his employer; 'Mr John Smith' is not redacted."
+      - "'Cllr James Brown' and 'James White MP' - neither name is redacted."
+
+    - name: "contact_identity_info"
+      label: "Contact and Identity Information"
+      model: "gpt-5.6-luna"
+      max_tokens: 2500
+      role: "You are a careful and consistent redaction assistant for Planning Inspectorate (PINS) National Infrastructure (NSIP) casework documents, which are published online and must comply with UK GDPR."
+      task: |
+        Identify every exact text span that must be redacted under the terms below, following the must-redact and do-not-redact rules.
+        Contact details are redacted even if the same document is available elsewhere online, because PINS is responsible for everything it publishes.
+        Apply the rules consistently: the same item in the same context must receive the same outcome every time. If you are genuinely unsure whether a telephone number, address, or email is personal or business, redact it ("if in doubt, take it out"), but never redact text that clearly falls outside the terms and exclusions below.
+        Return only the exact terms as they appear in the text. Do not paraphrase, expand, shorten, normalise, or alter the wording.
+      redaction_terms:
+      - "Personal or residential addresses and postcodes, including the addresses of third parties, sole traders, farmers, and named experts, and domestic addresses given on behalf of an organisation"
+      - "Personal email addresses, and the individual's name part of work email addresses (e.g. the 'firstname.surname' before the @ sign)"
+      - "Personal, mobile, and fax telephone numbers, and direct work telephone numbers of individuals writing on behalf of an organisation"
+      - "Handwritten (ink) signatures, and typed signatures where the name appears with employer details such as a letterhead or email address"
+      - "National Insurance numbers, e.g. AB 12 34 56 C, and Interested Party (IP) reference numbers"
+      - "Vehicle registration numbers"
+      - "Hyperlinks to external websites other than those allowed in the do-not-redact rules"
+      must_redact:
+      - "Always redact the address of a farmer or sole trader, even though the name of their farm or business is not redacted."
+      - "Redact the individual's name part of a work email address, even when the domain itself is not redacted."
+      - "Redact a typed signature if the name appears with employer details, such as a letterhead or email signature block, even if the name alone would not be redacted."
+      - "Redact Inspectors' or Examining Authority members' home addresses, and PINS staff direct telephone numbers and individual work email addresses, even though PINS office addresses and generic/project mailboxes are not redacted."
+      do_not_redact:
+      - "Business, office, workplace, council, public body, or Planning Inspectorate addresses, or the address of a development site, application site, or land parcel."
+      - "The names of properties or buildings identified on a plan or map, or a postcode alone where it does not identify an individual's home."
+      - "Generic, shared, or project mailboxes, e.g. info@, planning@, a named project or team mailbox, or Planning Inspectorate project, customer service, or switchboard email addresses and telephone numbers."
+      - "The author's name in the 'from' field, a typed name used as a signature in correspondence from a participant or the Examining Authority, or a signature that is only the name of a company or a senior member of staff whose status is known."
+      - "Planning Inspectorate staff office addresses."
+      - "Hyperlinks to gov.uk or gov.wales sites, the Planning Inspectorate or Secretary of State, examination documents, the applicant's project website, or the websites of statutory bodies (for example Natural England or the Environment Agency)."
+      - "Planning application reference numbers, case reference numbers, plot numbers, dates, or years."
+      examples:
+      - "'The clerk of the Parish Council, 1 High Street, Anytown' - the address is redacted because it is a domestic address given on behalf of an organisation; 'the Parish Council' is not."
+      - "'info@natural-england.org.uk' - not redacted, because it is a generic mailbox."
+      - "'j.smith@hmrc.gov.uk' - 'j.smith' is redacted, but the domain is not."
+      - "A link to 'www.gov.uk/...' is not redacted; an embedded link to an unrelated external news site is redacted."
+      - "'I live under the flight path in AB1 2CD' - not redacted; a postcode alone does not identify an individual's home."
+
+    - name: "sensitive_info"
+      label: "Sensitive Information"
+      model: "gpt-5.6-luna"
+      role: "You are a careful and consistent redaction assistant for Planning Inspectorate (PINS) National Infrastructure (NSIP) casework documents, which are published online and must comply with UK GDPR."
+      task: |
+        Identify every exact text span that must be redacted under the terms below, following the must-redact and do-not-redact rules.
+        This rule covers special category data, criminal offence data, personal finances, and defamatory statements that identify a person or company. It does not cover general opinions, feelings, or objections about a project.
+        Apply the rules consistently: the same statement in the same context must receive the same outcome every time. If a statement is genuinely ambiguous after considering its sentence and paragraph, redact the specific sensitive span ("if in doubt, take it out"), but never redact text that clearly falls outside the terms and exclusions below.
+        Return only the exact terms as they appear in the text. Do not paraphrase, expand, shorten, normalise, or alter the wording.
+      redaction_terms:
+      - "Diagnosed or stated medical conditions, ailments, disabilities, medication, or treatment of an identifiable person, including a family member or third party"
+      - "Personal information about a person's race, ethnic origin, political opinions, religion or philosophical beliefs, trade union membership, sex life, or sexual orientation"
+      - "Criminal offences, convictions, allegations, investigations, or penalties relating to an identifiable person"
+      - "Statements that are defamatory, libellous, vexatious, or abusive about an identifiable person or named company or applicant, including offensive or swearing language aimed at them"
+      - "Personal financial information: personal salaries, bonuses, shares, bank accounts, loans, and personal valuations"
+      must_redact:
+      - "Where an accusation of wrongdoing (for example forced or slave labour) names both the applicant/company and the project and the two cannot be separated, redact the applicant or company name."
+      - "Redact a diagnosed or stated medical condition even when it is mentioned about a third party or family member, e.g. 'my autistic child'."
+      do_not_redact:
+      - "Feelings or effects such as stress, anxiety, poor sleep, 'my health is affected', or 'wellbeing', and general noise or pollution concerns, unless they state an actual diagnosis or named condition."
+      - "General statements about the population or published research, e.g. WHO guidance on noise and health."
+      - "General statements such as 'I work in a special needs school', or ordinary political, environmental, or ethical opinions about a project, applicant, or policy."
+      - "Place names such as Uyghur or Xinjiang, general unattributed references to slave labour, or references to the Ukraine or Russia war."
+      - "Criticism of a proposal, site, policy, decision, process, or authority, unless it makes a defamatory statement about an identifiable person or company."
+      - "Corporate or public financial information, funding statements, viability, costs, budgets, CIL, section 106 contributions, land values, or the published financial accounts of Ltd or Plc companies submitted for a legitimate purpose."
+      - "General planning, environmental, heritage, transport, drainage, or infrastructure content."
+      - "Information about deceased people."
+      examples:
+      - "'My health is currently affected by the airport and it will be much exacerbated if the growth is agreed' - not redacted; this is a feeling, not a diagnosis."
+      - "'I have been diagnosed with <illness>' - redacted; this is a stated diagnosis."
+      - "'I have a severely autistic child who is awake most nights' - 'severely autistic child' is redacted."
+      - "'<Applicant's Name> has been undoubtedly established as a beneficiary of Uyghur slave labour' - the applicant's name is redacted; 'Uyghur' is not."
+      - "'Human rights issues with Chinese company producing them. British companies should be doing solar projects' - not redacted; this is a general statement, not aimed at an identifiable company."
+
+    - name: "personal_info_protected_sites"
+      label: "Personal Details and Protected Sites"
+      model: "gpt-5.6-luna"
+      role: "You are a careful and consistent redaction assistant for Planning Inspectorate (PINS) National Infrastructure (NSIP) casework documents, which are published online and must comply with UK GDPR."
+      task: |
+        Identify every exact text span that must be redacted under the terms below, following the must-redact and do-not-redact rules.
+        This rule covers two areas: age and date-of-birth details of individuals, and the precise locations of protected species whose disclosure could lead to harm such as persecution, baiting, or egg collecting.
+        Apply the rules consistently: the same item in the same context must receive the same outcome every time. Never redact text that clearly falls outside the terms and exclusions below.
+        Return only the exact terms as they appear in the text. Do not paraphrase, expand, shorten, normalise, or alter the wording.
+      redaction_terms:
+      - "Dates of birth, ages, and birthdays of individuals, including children"
+      - "The specific location of a badger sett, including when plotted on a map or plan"
+      - "The specific location of a bat maternity roost, or of a large roost of a rare bat species"
+      - "The exact location of nests of birds of prey and Schedule 1 birds, and of the breeding sites of other highly sensitive species"
+      - "The exact location of populations of very rare or protected plants and invertebrates, and of otter holts"
+      must_redact:
+      - "Redact an age wherever it states or allows calculation of a specific person's age, e.g. 'my entire 65 years of life', 'aged 12', 'my 8-year-old son'."
+      do_not_redact:
+      - "Vague or approximate statements such as 'over 60 years', 'for 40+ years', or how long someone has lived at an address or in an area."
+      - "Ordinary dates, years, planning, decision, or consultation dates, or reference numbers."
+      - "Vague species locations, such as a named wood, a coarse grid reference, or a distance and direction from a village."
+      - "General references to badgers, bats, birds, otters, protected species, surveys, habitats, ecology, mitigation measures, replacement boxes, trees to be felled, or field signs such as footprints, latrines, or paths."
+      - "The location of most other bat roosts or bird boxes, locations of species that are already publicly known, or locations of species whose habitat is not at risk."
+      - "Photographs or descriptions of species unless they can be linked to a specific protected location."
+      examples:
+      - "'I have lived at the address for my entire 65 years of life' - '65' is redacted, because 'entire' ties it to the person's age."
+      - "'Over the 60+ years I have seen this airport grow' - not redacted; this is a vague length of time, not a stated age."
+      - "'Sett 1 is in a wooded pit slightly to the west of Footpath 6 heading north from the village of X' - redacted; this pinpoints a badger sett."
+      - "'Badger setts have been identified in Robin's Wood' - not redacted; this is a vague location."
+
+  - redactor_type: "ImageRedaction"
+    redaction_rules:
+    - name: "Image_Redactor_01"
+
+  - redactor_type: "ImageTextRedaction"
+    redaction_rules:
+    - name: "Image_Text_Redactor_01"
+
+  - redactor_type: "ImageLLMTextRedaction"
+    redaction_rules:
+    - name: "Image_LLM_Text_Redactor_01"
+      text_redaction_rule: "names"
+
+    - name: "Image_LLM_Text_Redactor_02"
+      text_redaction_rule: "contact_identity_info"
+
+    - name: "Image_LLM_Text_Redactor_03"
+      text_redaction_rule: "sensitive_info"
+
+    - name: "Image_LLM_Text_Redactor_04"
+      text_redaction_rule: "personal_info_protected_sites"
+
+provisional_redactions: []
