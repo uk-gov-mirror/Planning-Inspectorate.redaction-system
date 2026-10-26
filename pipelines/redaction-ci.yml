@@ -91,7 +91,7 @@ extends:
               set -e
               source $(System.DefaultWorkingDirectory)/.venv/bin/activate
               cd redaction-system
-              python3 -m pip install . --group eval
+              python3 -m pip install .[eval]
             displayName: 'Install redactor package'
 
           - script: |
