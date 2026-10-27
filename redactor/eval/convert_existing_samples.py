@@ -10,7 +10,7 @@
 
 Example (run from the `redactor` directory):
 
-    python -m tests.eval.convert_existing_samples --out tests/eval/data/existing_test.jsonl
+    python -m eval.convert_existing_samples --out eval/data/existing_test.jsonl
 """
 
 import argparse
@@ -22,7 +22,7 @@ import pymupdf
 
 from .corpus import UNSPECIFIED_RULE, Document, Entity, validate_document, write_corpus
 
-E2E_DATA = Path(__file__).parents[1] / "e2e" / "data"
+E2E_DATA = Path(__file__).parents[1] / "tests" / "e2e" / "data"
 _SAMPLE_HEADING = re.compile(r"^\s*Sample\s+(\d+)\s*:", re.MULTILINE)
 _GROUP_HEADING = re.compile(r"^\s*Group [AB]\s*$\n?", re.MULTILINE)
 
