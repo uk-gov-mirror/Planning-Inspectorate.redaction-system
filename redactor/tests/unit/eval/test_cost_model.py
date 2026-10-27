@@ -1,17 +1,32 @@
 import json
 import math
+from unittest.mock import patch
 
 import numpy as np
 import pytest
+from eval import cost_model
 from eval.cost_model import (
     ChunkCountModel,
+    CostConfig,
+    PipelineCostModel,
+    TokenPrices,
+    assign_folds,
+    band_index,
+    band_labels,
     build_observations,
+    cacheable_prefix_tokens,
     config_of,
+    cross_validate,
+    error_metrics,
     fit_cost_model,
+    fit_cost_models,
+    format_validation,
     load_rows,
     main,
+    select_configs,
     single_pass_mask,
 )
+from eval.summarise_chunk_sweep import estimate_cost_gbp
 
 DOC_TOKENS = [400, 900, 1800, 3500, 6000, 9000, 14000, 20000]
 SETTINGS = [(1000, 40), (3000, 120)]
@@ -178,9 +193,6 @@ def test_cost_model__predict_tokens():
     factor = model.input_tokens.inflation[(3000, 120)]
     assert swept["chunk_count"][0] == n
     assert swept["input_tokens"][0] == pytest.approx(single_pass_input * factor)
-    assert swept["per_chunk_input_tokens"][0] == pytest.approx(
-        PER_CHUNK_INPUT * n * factor
-    )
     assert swept["in_range"].tolist() == [True, False]
     assert unswept["input_tokens"][0] == pytest.approx(
         model.input_tokens.predict_single_pass(np.array([[n, 900, (n - 1) * 80]]))[0]
@@ -196,3 +208,286 @@ def test_main__prints_a_summary_per_configuration(tmp_path, capsys):
     out = capsys.readouterr().out
     assert out.startswith("names (gpt-5.6-luna")
     assert "per_chunk=1700.000" in out
+
+
+PRICES = TokenPrices(
+    uncached_input=1.0, cached_input=0.1, cache_write=2.0, completion=3.0
+)
+
+
+def _rows_for(rule, prompt_tokens=1610, retry_every=0, **overrides):
+    return [
+        row | {"rule": rule, "prompt_tokens": prompt_tokens} | overrides
+        for row in _rows(retry_every)
+    ]
+
+
+def _fitted(rule="names", prompt_tokens=1610):
+    rows = _rows_for(rule, prompt_tokens)
+    config, observations = next(iter(build_observations(rows).items()))
+    return fit_cost_model(config, observations)
+
+
+@pytest.mark.parametrize(
+    ("prompt_tokens", "expected"),
+    [(784, 0), (1023, 0), (1024, 1024), (1151, 1024), (1152, 1152), (1610, 1536)],
+)
+def test_cacheable_prefix_tokens(prompt_tokens, expected):
+    assert cacheable_prefix_tokens(prompt_tokens) == expected
+
+
+def test_token_prices__match_the_sweep_cost_estimate():
+    """Pricing observed tokens reproduces `estimate_cost_gbp`, so predicted and
+    measured costs are on the same footing"""
+    row = {
+        "model": "gpt-5.6-luna",
+        "input_tokens": 10_000,
+        "cached_input_tokens": 6_000,
+        "cache_write_tokens": 500,
+        "completion_tokens": 1_200,
+    }
+
+    prices = TokenPrices.for_model("gpt-5.6-luna")
+
+    assert prices.cost(10_000, 6_000, 500, 1_200) == pytest.approx(
+        estimate_cost_gbp(row)
+    )
+
+
+def test_token_prices__unknown_model():
+    with pytest.raises(ValueError, match="No prices"):
+        TokenPrices.for_model("not-a-model")
+
+
+def test_predict_cost__caching_scenarios():
+    """
+    - Given a fitted model
+    - When I price documents with no caching, prompt caching and the sweep's caching
+    - Then cached tokens are 0, the cacheable prompt prefix per chunk (capped at the
+      input), and the sweep's cached share, and each is billed at the cached rate
+    """
+    model = _fitted()
+    docs = [900, 9000]
+
+    none = model.predict_cost(docs, 3000, 120, "none", PRICES)
+    prompt = model.predict_cost(docs, 3000, 120, "prompt", PRICES)
+    sweep = model.predict_cost(docs, 3000, 120, "sweep", PRICES)
+
+    assert none.cached_input_tokens.tolist() == [0, 0]
+    assert none.cost_gbp == pytest.approx(
+        none.input_tokens + 3 * none.completion_tokens
+    )
+    inflation = model.input_tokens.inflation_for(3000, 120)
+    expected_cached = np.minimum(
+        prompt.input_tokens, 1536 * prompt.chunk_count * inflation
+    )
+    assert prompt.cached_input_tokens == pytest.approx(expected_cached)
+    assert prompt.cost_gbp == pytest.approx(
+        (prompt.input_tokens - expected_cached)
+        + 0.1 * expected_cached
+        + 3 * prompt.completion_tokens
+    )
+    assert sweep.cached_input_tokens == pytest.approx(0.5 * sweep.input_tokens)
+    assert sweep.cache_write_tokens.tolist() == [0, 0]
+    assert (none.cost_gbp > prompt.cost_gbp).all()
+
+
+def test_predict_cost__short_prompts_are_not_cached():
+    model = _fitted(prompt_tokens=900)
+
+    estimate = model.predict_cost([5000], 1000, 40, "prompt", PRICES)
+
+    assert estimate.cached_input_tokens.tolist() == [0]
+
+
+def _two_rule_rows():
+    return _rows_for("names") + _rows_for("sensitive_info", prompt_tokens=900)
+
+
+def test_pipeline_cost_model__sums_rules():
+    pipeline = PipelineCostModel.build(
+        fit_cost_models(build_observations(_two_rule_rows()))
+    )
+
+    cost = pipeline.predict_cost([900, 5000], (1000, 40), "none", PRICES)
+
+    expected = sum(
+        model.predict_cost([900, 5000], 1000, 40, "none", PRICES).cost_gbp
+        for model in pipeline.models.values()
+    )
+    assert set(cost.rules) == {"names", "sensitive_info"}
+    assert cost.cost_gbp == pytest.approx(expected)
+    assert cost.in_range.tolist() == [True, True]
+    assert pipeline.predict_cost([50000], (1000, 40)).in_range.tolist() == [False]
+
+
+def test_pipeline_cost_model__chunk_setting_per_rule():
+    pipeline = PipelineCostModel.build(
+        fit_cost_models(build_observations(_two_rule_rows()))
+    )
+
+    cost = pipeline.predict_cost(
+        [9000], {"names": (1000, 40), "sensitive_info": (3000, 120)}, "none", PRICES
+    )
+
+    assert (
+        cost.rules["names"].chunk_count[0] > cost.rules["sensitive_info"].chunk_count[0]
+    )
+    assert cost.rules["sensitive_info"].cost_gbp == pytest.approx(
+        pipeline.models["sensitive_info"]
+        .predict_cost([9000], 3000, 120, "none", PRICES)
+        .cost_gbp
+    )
+
+
+def test_pipeline_cost_model__build_needs_one_configuration_per_rule():
+    rows = _rows_for("names") + _rows_for("names", max_completion_tokens=2500)
+    models = fit_cost_models(build_observations(rows))
+
+    with pytest.raises(ValueError, match="2 configurations"):
+        PipelineCostModel.build(models)
+    with pytest.raises(ValueError, match="No configuration"):
+        PipelineCostModel.build(models, rules=["sensitive_info"])
+    chosen = PipelineCostModel.build(models, max_completion_tokens=2500)
+    assert chosen.models["names"].config.max_completion_tokens == 2500
+
+
+def test_select_configs__filters_to_one_configuration_per_rule():
+    rows = _two_rule_rows() + _rows_for("names", max_completion_tokens=2500)
+    observations = build_observations(rows)
+
+    selected = select_configs(observations, max_completion_tokens=4000)
+
+    assert sorted(config.rule for config in selected) == ["names", "sensitive_info"]
+    assert all(isinstance(config, CostConfig) for config in selected)
+
+
+def test_assign_folds__keeps_documents_whole():
+    doc_ids = [f"doc-{i}" for i in range(8)] * 4
+
+    leave_one_out, n_folds = assign_folds(doc_ids, None)
+    three_fold, three = assign_folds(doc_ids, 3)
+
+    assert n_folds == 8
+    assert sorted(leave_one_out.values()) == list(range(8))
+    assert three == 3
+    assert set(three_fold.values()) == {0, 1, 2}
+    assert len(three_fold) == 8
+    assert assign_folds(doc_ids, 20)[1] == 8
+    with pytest.raises(ValueError, match="two documents"):
+        assign_folds(["a", "a"], None)
+    with pytest.raises(ValueError, match="two folds"):
+        assign_folds(doc_ids, 1)
+
+
+def test_error_metrics():
+    """Rows with nothing observed, or no prediction, are ignored"""
+    metrics = error_metrics([100, 200, 0, 50], [110, 180, 5, np.nan])
+
+    assert metrics.rows == 2
+    assert metrics.mape == pytest.approx(0.1)
+    assert metrics.median_ape == pytest.approx(0.1)
+    assert metrics.bias == pytest.approx(290 / 300 - 1)
+    assert metrics.r_squared == pytest.approx(0.9)
+
+
+def test_error_metrics__nothing_to_compare():
+    metrics = error_metrics([0.0], [1.0])
+
+    assert metrics.rows == 0
+    assert math.isnan(metrics.mape)
+
+
+def test_length_bands():
+    edges = (1000, 3000, 10000)
+
+    assert band_labels(edges) == ["<1000", "1000-3000", "3000-10000", ">=10000"]
+    assert band_index(
+        np.array([999, 1000, 2999, 3000, 10000, 50000]), edges
+    ).tolist() == [
+        0,
+        1,
+        1,
+        2,
+        3,
+        3,
+    ]
+
+
+def test_cross_validate__holds_out_whole_documents():
+    """Every model is fitted without exactly one document, and every document is
+    held out once, so no document informs its own prediction"""
+    selected = select_configs(build_observations(_two_rule_rows()))
+    trained = []
+    real_fit = cost_model.fit_cost_model
+
+    def recording_fit(config, observations):
+        trained.append(set(observations.doc_id))
+        return real_fit(config, observations)
+
+    with patch.object(cost_model, "fit_cost_model", side_effect=recording_fit):
+        cross_validate(selected)
+
+    all_docs = {f"doc-{i}" for i in range(len(DOC_TOKENS))}
+    held_out = [all_docs - docs for docs in trained]
+    assert all(len(docs) == 1 for docs in held_out)
+    assert set().union(*held_out) == all_docs
+
+
+def test_cross_validate__beats_the_baseline_on_short_documents():
+    """
+    - Given costs that are a fixed amount per chunk plus an amount per token
+    - When I cross-validate
+    - Then held-out cost is predicted closely, and better than a cost-per-token
+      baseline, most of all for the shortest documents where the fixed cost dominates
+    """
+    selected = select_configs(build_observations(_two_rule_rows()))
+
+    validation = cross_validate(selected)
+
+    assert validation.documents == len(DOC_TOKENS)
+    assert validation.folds == len(DOC_TOKENS)
+    assert set(validation.rules) == {"names", "sensitive_info"}
+    assert validation.rules["names"]["input_tokens"].mape < 0.05
+    model, baseline = validation.pipeline["model"], validation.pipeline["baseline"]
+    assert model.mape < 0.1
+    assert model.mape < baseline.mape
+    short = validation.pipeline_by_length["<1000"]
+    assert short["model"].mape < short["baseline"].mape / 2
+    assert validation.rules_by_length["names"]["<1000"]["model"].rows > 0
+
+
+def test_cross_validate__requires_one_configuration_per_rule():
+    rows = _rows_for("names") + _rows_for("names", max_completion_tokens=2500)
+
+    with pytest.raises(ValueError, match="exactly one configuration"):
+        cross_validate(build_observations(rows))
+
+
+def test_format_validation():
+    selected = select_configs(build_observations(_two_rule_rows()))
+
+    text = format_validation(cross_validate(selected, folds=4))
+
+    assert "Cross-validation: 8 documents, 4 folds" in text
+    assert "Pipeline cost (sum of rules)" in text
+    assert "<1000 model" in text
+    assert "baseline_cost_gbp" in text
+
+
+def test_main__validate(tmp_path, capsys):
+    _write(tmp_path / "results.jsonl", _two_rule_rows())
+
+    main(["--results", str(tmp_path / "results.jsonl"), "--validate"])
+
+    assert "Cross-validation: 8 documents" in capsys.readouterr().out
+
+
+def test_main__validate_needs_one_configuration_per_rule(tmp_path):
+    rows = _rows_for("names") + _rows_for("names", max_completion_tokens=2500)
+    _write(tmp_path / "results.jsonl", rows)
+    path = str(tmp_path / "results.jsonl")
+
+    with pytest.raises(SystemExit):
+        main(["--results", path, "--validate"])
+    main(["--results", path, "--validate", "--max-completion-tokens", "4000"])
