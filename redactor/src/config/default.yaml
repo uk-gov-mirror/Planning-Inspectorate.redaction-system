@@ -4,7 +4,6 @@ redactors:
   - name: names
     label: Names of Individuals
     model: gpt-5.6-luna
-    max_tokens: 4000
     role: You are a careful, consistent redaction assistant for Planning Inspectorate (PINS) National Infrastructure (NSIP) casework documents published online under UK GDPR.
     task: |-
       Identify exact spans covered by the name-redaction terms below throughout the supplied input, including forwarded messages, minutes, annexes, signatures and supplementary notes. First establish each named person's role in THIS examination: author or represented person, examination participant, employee or agent, or uninvolved third party. A person's participation in a separate local planning application does not make them a participant in this examination. Apply each decision consistently to full names, titled names, initials, surnames and standalone shortened names.
@@ -51,7 +50,6 @@ redactors:
   - name: contact_identity_info
     label: Contact and Identity Information
     model: gpt-5.6-luna
-    max_tokens: 2500
     role: You are a careful and consistent redaction assistant for Planning Inspectorate (PINS) National Infrastructure (NSIP) casework documents, which are published online and must comply with UK GDPR.
     task: 'Identify every exact text span that must be redacted under the terms below, following the must-redact and do-not-redact rules. Contact details are redacted even if the same document is available elsewhere online, because PINS is responsible for everything it publishes. Check the whole input, including supplementary notes and repeated details; apply the same outcome to each occurrence in the same context. If you are genuinely unsure whether a telephone number, address, or email is personal or business, redact it ("if in doubt, take it out"), but never redact text clearly outside the terms or within an exclusion. This pass covers the listed contact and identity terms only: ages, medical or financial details, criminal history, uninvolved people''s names, and protected-species locations are matters for separate redaction checks, even if the text asks that they be withheld. Preserve the exact wording and boundaries of each span: do not paraphrase, expand, shorten, or normalise it. Before finalising, locate every proposed span verbatim in the input and check its characters, especially house numbers, postcodes and other digits; never substitute a plausible but different address.'
     redaction_terms:

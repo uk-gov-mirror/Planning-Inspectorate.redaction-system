@@ -103,7 +103,7 @@ def update_max_tokens(retry_state):
 class LLMTextAnalyserConfig(BaseModel):
     model: str
     """The LLM model to use"""
-    max_tokens: int | None = 1000
+    max_tokens: int | None = 4000
     """Maximum number of tokens per completion, including reasoning tokens"""
     reasoning_effort: Literal["minimal", "low", "medium", "high"] | None = None
     """Reasoning effort for reasoning models. None uses the model's default"""
