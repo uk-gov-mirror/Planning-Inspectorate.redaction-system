@@ -145,7 +145,7 @@ class LLMTextAnalyser:
 
     # Azure Foundry quota limits and cost in GBP per 1M tokens - correct on 06/01/26
     OPENAI_MODELS: ClassVar[dict[str, dict[str, int]]] = {
-        "gpt-5.6-luna": {  # need to check these values
+        "gpt-5.6-luna": {
             "token_rate_limit": 3000000,  # nosec: B105
             "request_rate_limit": 3000,
             "input_cost": 16,
