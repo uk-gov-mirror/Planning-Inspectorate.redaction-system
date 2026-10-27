@@ -130,6 +130,43 @@ Run all commands from the `redactor` directory.
 
 Keep the prompts frozen for the whole sweep. Changing a prompt invalidates the comparison.
 
+## Cost model
+
+`cost_model.py` fits the sweep's token usage and forecasts the cost of redacting a document
+(the text rules only, not the signature detector or OCR) from its length and the chunk
+settings. Input tokens are `a*chunks + b*document_tokens + c*(chunks-1)*overlap`, completion
+tokens `a*chunks + b*document_tokens`. Prices come from `LLMTextAnalyser.OPENAI_MODELS`.
+
+```bash
+# Fit, and print each model's fit
+uv run python -m eval.cost_model --results eval/results/*/results.jsonl
+# Leave-one-document-out validation against a no-model baseline, with plots
+uv run python -m eval.cost_model --results ... --validate --plots-dir eval/results/cost_plots
+# Forecast, using the chunk settings in the redaction config
+uv run python -m eval.cost_model --results ... --predict --lengths lengths.json --characters \
+    --batch-size 12 --plots-dir eval/results/cost_plots
+```
+
+`--predict` prints the expected cost per document with a 95% interval, the cost of a document
+of the mean length (lower, since every document pays a fixed cost per chunk), and the cost of
+the next batch. Lengths come from `--corpus` (optionally `--split`) or `--lengths`
+(a JSON array or one number per line, in tokens, or in characters with `--characters`).
+`--caching` is `none`, `prompt` (the default: the shared prompt prefix is cached) or `sweep`
+(the sweep's own cached tokens).
+
+- The interval on the mean resamples whole documents and refits every rule, so the rules'
+  errors stay correlated. The per-document prediction interval also draws held-out
+  observed/predicted cost ratios from documents of a similar length. With about 40 documents
+  it covers a little less than its nominal level (about 80% for a 90% interval in
+  simulation), so treat it as a guide.
+- Refit after changing a prompt, the model, `max_completion_tokens`, reasoning effort or the
+  chunk settings. `--predict` warns when the production settings differ from the fitted ones.
+  A sweep run with a smaller `max_completion_tokens` includes retries that production at 4000
+  doesn't, which inflates the fitted completion cost.
+- Short documents (under about 1,000 tokens) are over-predicted, and lengths outside the fitted
+  range are flagged. The cached share in the sweep (80-88%) is an artefact of repeated
+  identical chunks, so don't use `--caching sweep` as a production estimate.
+
 ## Prompt engineering with MLflow
 
 `optimise_prompt.py` versions, scores and optimises each rule's system prompt with MLflow

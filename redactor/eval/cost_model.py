@@ -18,9 +18,19 @@ Pricing prices those token predictions under an explicit caching scenario and su
 the rules into a per-document pipeline cost. `cross_validate` holds out whole
 documents to check the model, and compares it with a cost-per-token baseline.
 
-Example (run from the `redactor` directory):
+`CostForecaster` adds uncertainty. It refits the model on bootstrap resamples of whole
+documents, and calibrates the spread of an individual document's cost from the
+held-out errors. It answers two questions: what one document of a given length costs,
+and what the average document costs given a distribution of document lengths, which is
+not the cost of the average-length document.
+
+Examples (run from the `redactor` directory):
 
     python -m eval.cost_model --results eval/results/optimised_sweep.jsonl --validate
+    python -m eval.cost_model --results eval/results/optimised_sweep.jsonl --predict \
+        --corpus eval/data/corpus.jsonl --plots-dir eval/results/cost_plots
+    python -m eval.cost_model --results eval/results/optimised_sweep.jsonl --predict \
+        --lengths production_chars.txt --characters
 """
 
 import argparse
@@ -29,12 +39,16 @@ from collections import defaultdict
 from collections.abc import Sequence
 from itertools import pairwise
 from pathlib import Path
-from typing import Literal
+from typing import Literal, get_args
 
 import numpy as np
+from matplotlib.ticker import NullFormatter
 from pydantic import BaseModel, ConfigDict, Field
+from tiktoken import get_encoding
 
-from src.analysis.text import LLMTextAnalyser
+from src.analysis.text import LLMTextAnalyser, LLMTextAnalyserConfig
+
+from .corpus import SPLITS, load_corpus
 
 ChunkSetting = tuple[int, int]
 """(chunk_size, chunk_overlap)"""
@@ -78,7 +92,7 @@ class CostObservations(BaseModel):
         return len(self.doc_id)
 
     def select(self, rows: np.ndarray) -> "CostObservations":
-        """The observations in the rows picked by a boolean mask"""
+        """The observations in the rows picked by a boolean mask or integer indices"""
         return CostObservations(
             **{name: getattr(self, name)[rows] for name in type(self).model_fields}
         )
@@ -232,13 +246,12 @@ class TokenComponent(BaseModel):
         self, features: np.ndarray, chunk_size: np.ndarray, chunk_overlap: np.ndarray
     ) -> np.ndarray:
         """Expected tokens including retries"""
-        inflation = np.array(
-            [
-                self.inflation_for(int(c), int(o))
-                for c, o in zip(np.atleast_1d(chunk_size), np.atleast_1d(chunk_overlap))
-            ]
+        settings = np.column_stack(
+            [np.atleast_1d(chunk_size), np.atleast_1d(chunk_overlap)]
         )
-        return self.predict_single_pass(features) * inflation
+        unique, inverse = np.unique(settings, axis=0, return_inverse=True)
+        factors = np.array([self.inflation_for(int(c), int(o)) for c, o in unique])
+        return self.predict_single_pass(features) * factors[inverse.reshape(-1)]
 
 
 def input_features(
@@ -622,6 +635,14 @@ class PipelineCostModel(BaseModel):
 
     models: dict[str, CostModel]
 
+    @property
+    def doc_token_range(self) -> tuple[float, float]:
+        """Document lengths inside the fitted range of every rule"""
+        return (
+            max(model.doc_token_range[0] for model in self.models.values()),
+            min(model.doc_token_range[1] for model in self.models.values()),
+        )
+
     @classmethod
     def build(
         cls,
@@ -701,7 +722,23 @@ def error_metrics(observed: np.ndarray, predicted: np.ndarray) -> ErrorMetrics:
     )
 
 
+class HeldOutCosts(BaseModel):
+    """Held-out cost of each row, priced without caching. NaN where no model could be
+    fitted without the row's document"""
+
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
+    doc_tokens: np.ndarray
+    chunk_size: np.ndarray
+    chunk_overlap: np.ndarray
+    observed: np.ndarray
+    model: np.ndarray
+    baseline: np.ndarray
+
+
 class Validation(BaseModel):
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
     documents: int
     folds: int
     rules: dict[str, dict[str, ErrorMetrics]]
@@ -713,6 +750,9 @@ class Validation(BaseModel):
     pipeline: dict[str, ErrorMetrics]
     """Cost summed over rules, for the model and the baseline"""
     pipeline_by_length: dict[str, dict[str, ErrorMetrics]]
+    rule_rows: dict[str, HeldOutCosts]
+    pipeline_rows: HeldOutCosts
+    """One row per document run in which every rule has a held-out prediction"""
 
 
 def assign_folds(
@@ -820,6 +860,57 @@ def _by_length(
     return result
 
 
+def _rule_rows(
+    observations: CostObservations, result: dict[str, np.ndarray]
+) -> HeldOutCosts:
+    return HeldOutCosts(
+        doc_tokens=observations.doc_tokens,
+        chunk_size=observations.chunk_size,
+        chunk_overlap=observations.chunk_overlap,
+        observed=result["observed_cost"],
+        model=result["predicted_cost"],
+        baseline=result["baseline_cost"],
+    )
+
+
+def _pipeline_rows(
+    per_rule: dict[str, tuple[CostObservations, dict[str, np.ndarray]]],
+) -> HeldOutCosts:
+    """Sum the rules for each document run, keeping only runs where every rule has a
+    held-out prediction"""
+    totals: dict[tuple, list[float]] = {}
+    for observations, result in per_rule.values():
+        for i in range(len(observations)):
+            if not np.isfinite(result["predicted_cost"][i]):
+                continue
+            key = (
+                str(observations.doc_id[i]),
+                int(observations.repeat[i]),
+                int(observations.chunk_size[i]),
+                int(observations.chunk_overlap[i]),
+            )
+            entry = totals.setdefault(
+                key, [0, 0.0, 0.0, 0.0, observations.doc_tokens[i]]
+            )
+            entry[0] += 1
+            entry[1] += result["observed_cost"][i]
+            entry[2] += result["predicted_cost"][i]
+            entry[3] += result["baseline_cost"][i]
+    complete = [(k, e) for k, e in totals.items() if e[0] == len(per_rule)]
+
+    def column(value) -> np.ndarray:
+        return np.array([value(key, entry) for key, entry in complete], dtype=float)
+
+    return HeldOutCosts(
+        doc_tokens=column(lambda key, entry: entry[4]),
+        chunk_size=column(lambda key, entry: key[2]),
+        chunk_overlap=column(lambda key, entry: key[3]),
+        observed=column(lambda key, entry: entry[1]),
+        model=column(lambda key, entry: entry[2]),
+        baseline=column(lambda key, entry: entry[3]),
+    )
+
+
 def cross_validate(
     selected: dict[CostConfig, CostObservations],
     folds: int | None = None,
@@ -845,7 +936,7 @@ def cross_validate(
         [doc_id for obs in selected.values() for doc_id in obs.doc_id], folds
     )
 
-    per_rule, rule_metrics, rule_lengths = {}, {}, {}
+    per_rule, rule_metrics, rule_lengths, rule_rows = {}, {}, {}, {}
     for config, observations in selected.items():
         prices = TokenPrices.for_model(config.model)
         result = _cross_validate_rule(config, observations, fold_of, n_folds, prices)
@@ -871,43 +962,27 @@ def cross_validate(
             result["baseline_cost"],
             length_edges,
         )
+        rule_rows[config.rule] = _rule_rows(observations, result)
 
-    # Sum the rules for each document run, keeping only runs where every rule has a
-    # held-out prediction
-    totals: dict[tuple, list[float]] = {}
-    for observations, result in per_rule.values():
-        for i in range(len(observations)):
-            if not np.isfinite(result["predicted_cost"][i]):
-                continue
-            key = (
-                str(observations.doc_id[i]),
-                int(observations.repeat[i]),
-                int(observations.chunk_size[i]),
-                int(observations.chunk_overlap[i]),
-            )
-            entry = totals.setdefault(
-                key, [0, 0.0, 0.0, 0.0, observations.doc_tokens[i]]
-            )
-            entry[0] += 1
-            entry[1] += result["observed_cost"][i]
-            entry[2] += result["predicted_cost"][i]
-            entry[3] += result["baseline_cost"][i]
-    complete = np.array([e for e in totals.values() if e[0] == len(per_rule)])
-    if len(complete):
-        observed, model, baseline, tokens = complete[:, 1:5].T
-    else:
-        observed = model = baseline = tokens = np.array([])
-
+    pipeline_rows = _pipeline_rows(per_rule)
     return Validation(
         documents=len(fold_of),
         folds=n_folds,
         rules=rule_metrics,
         rules_by_length=rule_lengths,
         pipeline={
-            "model": error_metrics(observed, model),
-            "baseline": error_metrics(observed, baseline),
+            "model": error_metrics(pipeline_rows.observed, pipeline_rows.model),
+            "baseline": error_metrics(pipeline_rows.observed, pipeline_rows.baseline),
         },
-        pipeline_by_length=_by_length(tokens, observed, model, baseline, length_edges),
+        pipeline_by_length=_by_length(
+            pipeline_rows.doc_tokens,
+            pipeline_rows.observed,
+            pipeline_rows.model,
+            pipeline_rows.baseline,
+            length_edges,
+        ),
+        rule_rows=rule_rows,
+        pipeline_rows=pipeline_rows,
     )
 
 
@@ -940,6 +1015,579 @@ def format_validation(validation: Validation) -> str:
             for name, metrics in results.items()
         ]
     return "\n".join(lines)
+
+
+class DocumentResampler:
+    """Draws bootstrap samples of whole documents, using the same documents for every
+    rule so that rules stay correlated, as they are in a real pipeline"""
+
+    def __init__(self, selected: dict[CostConfig, CostObservations]):
+        self.selected = selected
+        self.rows = {
+            config: {
+                doc_id: np.flatnonzero(observations.doc_id.astype(str) == doc_id)
+                for doc_id in {str(d) for d in observations.doc_id}
+            }
+            for config, observations in selected.items()
+        }
+        self.doc_ids = sorted({d for rows in self.rows.values() for d in rows})
+
+    def sample(self, rng: np.random.Generator) -> dict[CostConfig, CostObservations]:
+        """A resample, as large as the original, with all rows of each drawn document"""
+        drawn = [
+            self.doc_ids[i]
+            for i in rng.integers(0, len(self.doc_ids), len(self.doc_ids))
+        ]
+        resampled = {}
+        for config, observations in self.selected.items():
+            rows = self.rows[config]
+            parts = [rows[doc_id] for doc_id in drawn if doc_id in rows]
+            resampled[config] = observations.select(np.concatenate(parts))
+        return resampled
+
+
+def bootstrap_pipeline_models(
+    selected: dict[CostConfig, CostObservations], iterations: int, seed: int = 0
+) -> list[PipelineCostModel]:
+    """Refit the pipeline on resamples of whole documents, to show how much the fitted
+    model depends on which documents were swept"""
+    rng = np.random.default_rng(seed)
+    resampler = DocumentResampler(selected)
+    replicates = []
+    for _ in range(iterations):
+        sample = resampler.sample(rng)
+        replicates.append(
+            PipelineCostModel(
+                models={
+                    config.rule: fit_cost_model(config, observations)
+                    for config, observations in sample.items()
+                }
+            )
+        )
+    return replicates
+
+
+MIN_RATIOS_PER_BAND = 20
+"""Fewest held-out errors needed to describe the spread within a length band"""
+
+
+class DocumentForecast(BaseModel):
+    """Predicted pipeline cost of individual documents, in GBP"""
+
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
+    caching: CachingScenario
+    level: float
+    doc_tokens: np.ndarray
+    cost_gbp: np.ndarray
+    ci_lower: np.ndarray
+    ci_upper: np.ndarray
+    """Uncertainty in the expected cost of a document of this length, from refitting
+    on resampled documents"""
+    pi_lower: np.ndarray
+    pi_upper: np.ndarray
+    """Where one new document's cost should fall: the same uncertainty plus the spread
+    of real costs around the model, taken from held-out errors"""
+    in_range: np.ndarray
+    """Whether the length is inside the range the models were fitted on"""
+
+
+class ExpectedCost(BaseModel):
+    """Cost of documents drawn from a distribution of lengths"""
+
+    documents: int
+    batch_size: int
+    caching: CachingScenario
+    level: float
+    mean_cost_gbp: float
+    """Mean over the given lengths of each document's predicted cost"""
+    mean_interval: tuple[float, float]
+    """Uncertainty in that mean from the fitted model and from the lengths being a
+    sample of the real distribution"""
+    cost_at_mean_length_gbp: float
+    """Cost of one document of the mean length, for comparison. Cost is not linear in
+    length, so this differs from the mean cost"""
+    total_cost_gbp: float
+    """Mean cost times the batch size"""
+    total_interval: tuple[float, float]
+    """Where the total for the next batch of that many documents should fall,
+    including the spread of real costs around the model"""
+    by_rule_gbp: dict[str, float]
+    """Mean cost per document for each rule"""
+    out_of_range_share: float
+    """Share of lengths outside the range the models were fitted on"""
+
+
+class CostForecaster(BaseModel):
+    """Cost predictions with intervals, for one configuration of each rule.
+
+    The expected cost uses the model fitted to every document. Its uncertainty comes
+    from refitting on bootstrap resamples of whole documents. The spread of an
+    individual document's cost around the model comes from the cross-validated ratio of
+    observed to predicted pipeline cost, drawn from documents of a similar length. That
+    ratio is measured without caching, and is applied as a relative error to costs
+    under any caching scenario.
+    """
+
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
+    pipeline: PipelineCostModel
+    replicates: list[PipelineCostModel]
+    validation: Validation
+    ratios: np.ndarray
+    ratio_tokens: np.ndarray
+    length_edges: tuple[int, ...]
+    seed: int = 0
+
+    @classmethod
+    def fit(
+        cls,
+        selected: dict[CostConfig, CostObservations],
+        iterations: int = 200,
+        folds: int | None = None,
+        seed: int = 0,
+        length_edges: Sequence[int] = DEFAULT_LENGTH_EDGES,
+    ) -> "CostForecaster":
+        """
+        :param selected: Observations for exactly one configuration per rule.
+        :param iterations: Bootstrap resamples of the documents.
+        :param folds: Folds for the held-out errors, or None to leave one document out.
+        :raises ValueError: If the configurations or documents are unsuitable, or there
+        are no held-out errors to describe the spread of real costs.
+        """
+        if iterations < 1:
+            raise ValueError("Need at least one bootstrap iteration")
+        validation = cross_validate(selected, folds, length_edges)
+        rows = validation.pipeline_rows
+        usable = np.isfinite(rows.model) & (rows.model > 0) & (rows.observed > 0)
+        if not usable.any():
+            raise ValueError("No held-out costs to calibrate the intervals from")
+        models = fit_cost_models(selected)
+        return cls(
+            pipeline=PipelineCostModel(
+                models={config.rule: model for config, model in models.items()}
+            ),
+            replicates=bootstrap_pipeline_models(selected, iterations, seed),
+            validation=validation,
+            ratios=rows.observed[usable] / rows.model[usable],
+            ratio_tokens=rows.doc_tokens[usable],
+            length_edges=tuple(length_edges),
+            seed=seed,
+        )
+
+    def _draw_ratios(self, doc_tokens: np.ndarray, rng: np.random.Generator):
+        """Observed over predicted cost, drawn from held-out documents of a similar
+        length. The ratios are spread differently for short and long documents"""
+        bands = band_index(doc_tokens, self.length_edges)
+        ratio_bands = band_index(self.ratio_tokens, self.length_edges)
+        drawn = np.empty(len(doc_tokens))
+        for band in np.unique(bands):
+            pool = self.ratios[ratio_bands == band]
+            if len(pool) < MIN_RATIOS_PER_BAND:
+                pool = self.ratios
+            in_band = bands == band
+            drawn[in_band] = rng.choice(pool, size=int(in_band.sum()))
+        return drawn
+
+    def predict_documents(
+        self,
+        doc_tokens: np.ndarray | float,
+        chunk_settings: ChunkSetting | dict[str, ChunkSetting],
+        caching: CachingScenario = "prompt",
+        level: float = 0.95,
+        seed: int | None = None,
+        prices: TokenPrices | None = None,
+    ) -> DocumentForecast:
+        """The cost of documents of these lengths, with intervals"""
+        doc_tokens = np.atleast_1d(np.asarray(doc_tokens, dtype=float))
+        rng = np.random.default_rng(self.seed if seed is None else seed)
+        point = self.pipeline.predict_cost(doc_tokens, chunk_settings, caching, prices)
+        expected = np.array(
+            [
+                replicate.predict_cost(
+                    doc_tokens, chunk_settings, caching, prices
+                ).cost_gbp
+                for replicate in self.replicates
+            ]
+        )
+        noisy = expected * np.array(
+            [self._draw_ratios(doc_tokens, rng) for _ in self.replicates]
+        )
+        low, high = (1 - level) / 2 * 100, (1 + level) / 2 * 100
+        ci_lower, ci_upper = np.percentile(expected, [low, high], axis=0)
+        pi_lower, pi_upper = np.percentile(noisy, [low, high], axis=0)
+        return DocumentForecast(
+            caching=caching,
+            level=level,
+            doc_tokens=doc_tokens,
+            cost_gbp=point.cost_gbp,
+            ci_lower=ci_lower,
+            ci_upper=ci_upper,
+            pi_lower=pi_lower,
+            pi_upper=pi_upper,
+            in_range=point.in_range,
+        )
+
+    def expected_cost(
+        self,
+        doc_tokens: np.ndarray,
+        chunk_settings: ChunkSetting | dict[str, ChunkSetting],
+        caching: CachingScenario = "prompt",
+        level: float = 0.95,
+        batch_size: int | None = None,
+        seed: int | None = None,
+        prices: TokenPrices | None = None,
+    ) -> ExpectedCost:
+        """
+        The cost of documents with this distribution of lengths.
+
+        Cost is averaged over the lengths, not computed at their mean, because cost
+        rises in steps with the number of chunks. Each bootstrap replicate also
+        resamples the lengths, so the interval on the mean covers the lengths being
+        only a sample of the real distribution.
+
+        :param doc_tokens: Token counts of a sample of real documents.
+        :param batch_size: Documents in the next batch whose total is predicted.
+        Defaults to the number of lengths given.
+        """
+        lengths = np.asarray(doc_tokens, dtype=float).ravel()
+        if not lengths.size:
+            raise ValueError("Give at least one document length")
+        count = len(lengths)
+        batch = batch_size or count
+        rng = np.random.default_rng(self.seed if seed is None else seed)
+
+        point = self.pipeline.predict_cost(lengths, chunk_settings, caching, prices)
+        at_mean = self.pipeline.predict_cost(
+            lengths.mean(), chunk_settings, caching, prices
+        ).cost_gbp[0]
+        means = np.empty(len(self.replicates))
+        totals = np.empty(len(self.replicates))
+        for i, replicate in enumerate(self.replicates):
+            sample = rng.choice(lengths, size=count)
+            means[i] = replicate.predict_cost(
+                sample, chunk_settings, caching, prices
+            ).cost_gbp.mean()
+            next_batch = rng.choice(lengths, size=batch)
+            cost = replicate.predict_cost(
+                next_batch, chunk_settings, caching, prices
+            ).cost_gbp
+            totals[i] = (cost * self._draw_ratios(next_batch, rng)).sum()
+
+        low, high = (1 - level) / 2 * 100, (1 + level) / 2 * 100
+        mean_cost = float(point.cost_gbp.mean())
+        return ExpectedCost(
+            documents=count,
+            batch_size=batch,
+            caching=caching,
+            level=level,
+            mean_cost_gbp=mean_cost,
+            mean_interval=tuple(float(x) for x in np.percentile(means, [low, high])),
+            cost_at_mean_length_gbp=float(at_mean),
+            total_cost_gbp=mean_cost * batch,
+            total_interval=tuple(float(x) for x in np.percentile(totals, [low, high])),
+            by_rule_gbp={
+                rule: float(estimate.cost_gbp.mean())
+                for rule, estimate in point.rules.items()
+            },
+            out_of_range_share=float(1 - point.in_range.mean()),
+        )
+
+
+class ProductionSettings(BaseModel):
+    """What a rule is configured to do in production"""
+
+    chunk_size: int
+    chunk_overlap: int
+    model: str
+    max_tokens: int | None
+    reasoning_effort: str | None
+    include_rationale: bool
+    prompt_tokens: int
+
+
+def production_settings(
+    config_name: str, rules: Sequence[str]
+) -> dict[str, ProductionSettings]:
+    """The chunking and LLM settings of each rule in a redaction config
+
+    :raises ValueError: If a rule is not an LLM text rule in the config.
+    """
+    from .run_chunk_sweep import load_rule_configs
+
+    settings = {}
+    for rule, config in load_rule_configs(config_name, list(rules)).items():
+        encoding = get_encoding(config.token_encoding_name)
+        settings[rule] = ProductionSettings(
+            chunk_size=config.chunk_size,
+            chunk_overlap=config.chunk_overlap,
+            model=config.model,
+            max_tokens=config.max_tokens,
+            reasoning_effort=config.reasoning_effort,
+            include_rationale=config.include_rationale,
+            prompt_tokens=len(encoding.encode(config.create_system_prompt())),
+        )
+    return settings
+
+
+def compatibility_warnings(
+    pipeline: PipelineCostModel, settings: dict[str, ProductionSettings]
+) -> list[str]:
+    """Ways production differs from the sweep the models were fitted on, which make
+    the predicted cost unreliable"""
+    warnings = []
+    for rule, model in pipeline.models.items():
+        fitted, production = model.config, settings.get(rule)
+        if production is None:
+            warnings.append(f"{rule}: not in the production config")
+            continue
+        for name, fitted_value, production_value in (
+            ("model", fitted.model, production.model),
+            (
+                "max_completion_tokens",
+                fitted.max_completion_tokens,
+                production.max_tokens,
+            ),
+            ("reasoning_effort", fitted.reasoning_effort, production.reasoning_effort),
+            (
+                "include_rationale",
+                fitted.include_rationale,
+                production.include_rationale,
+            ),
+            ("prompt_tokens", fitted.prompt_tokens, production.prompt_tokens),
+        ):
+            if fitted_value != production_value:
+                warnings.append(
+                    f"{rule}: fitted with {name}={fitted_value} but production uses "
+                    f"{production_value}. Rerun the sweep before relying on the cost"
+                )
+    return warnings
+
+
+def read_lengths(
+    path: Path | str, characters: bool = False, chars_per_token: float = 4.0
+) -> np.ndarray:
+    """Document lengths from a JSON array or whitespace-separated numbers
+
+    :param characters: The numbers are characters, which are converted to tokens.
+    """
+    text = Path(path).read_text(encoding="utf-8")
+    try:
+        values = json.loads(text)
+    except json.JSONDecodeError:
+        values = text.split()
+    if not isinstance(values, list):
+        values = [values]
+    lengths = np.array([float(value) for value in values], dtype=float)
+    if characters:
+        lengths = lengths / chars_per_token
+    if not lengths.size or (lengths <= 0).any():
+        raise ValueError(f"{path} must give at least one positive document length")
+    return lengths
+
+
+def corpus_token_lengths(path: Path | str, split: str | None, model: str) -> np.ndarray:
+    """Token counts of the documents in a corpus, using the model's tokenizer"""
+    encoding = get_encoding(LLMTextAnalyserConfig(model=model).token_encoding_name)
+    documents = load_corpus(path, split=split)
+    return np.array([len(encoding.encode(d.text)) for d in documents], dtype=float)
+
+
+def format_expected_cost(
+    expected: ExpectedCost,
+    lengths: np.ndarray,
+    fitted_range: tuple[float, float],
+) -> str:
+    """The expected cost of documents with a given distribution of lengths"""
+
+    def money(value: float, digits: int = 4) -> str:
+        return f"£{value:,.{digits}f}"
+
+    def interval(bounds: tuple[float, float], digits: int = 4) -> str:
+        return f"[{money(bounds[0], digits)}, {money(bounds[1], digits)}]"
+
+    gap = expected.cost_at_mean_length_gbp / expected.mean_cost_gbp - 1
+    rules = ", ".join(
+        f"{rule} {money(cost)}" for rule, cost in expected.by_rule_gbp.items()
+    )
+    heading = (
+        f"Expected cost per document (caching: {expected.caching}, "
+        f"{expected.level:.0%} intervals)"
+    )
+    spread = (
+        f"  {expected.documents:,} documents; tokens min {lengths.min():,.0f}, "
+        f"median {np.median(lengths):,.0f}, mean {lengths.mean():,.0f}, "
+        f"max {lengths.max():,.0f}"
+    )
+    coverage = (
+        f"  fitted range {fitted_range[0]:,.0f}-{fitted_range[1]:,.0f} tokens; "
+        f"{expected.out_of_range_share:.1%} of documents are outside it"
+    )
+    mean = f"  mean cost {money(expected.mean_cost_gbp)} {interval(expected.mean_interval)}"
+    at_mean = (
+        f"  cost of a mean-length document {money(expected.cost_at_mean_length_gbp)} "
+        f"({gap:+.1%} against the mean cost)"
+    )
+    batch = (
+        f"  next {expected.batch_size:,} documents "
+        f"{money(expected.total_cost_gbp, 2)} {interval(expected.total_interval, 2)}"
+    )
+    return "\n".join(
+        [heading, spread, coverage, mean, at_mean, batch, f"  by rule: {rules}"]
+    )
+
+
+def _pyplot():
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    return plt
+
+
+def _binned_median(
+    x: np.ndarray, y: np.ndarray, bins: int = 8, minimum: int = 3
+) -> tuple[list[float], list[float]]:
+    """Median of y in log-spaced bins of x, skipping bins with few points"""
+    centres, medians = [], []
+    for low, high in pairwise(np.geomspace(x.min(), x.max(), bins + 1)):
+        in_bin = (x >= low) & (x <= high)
+        if in_bin.sum() >= minimum:
+            centres.append(float(np.sqrt(low * high)))
+            medians.append(float(np.median(y[in_bin])))
+    return centres, medians
+
+
+def plot_validation(validation: Validation, out_dir: Path | str) -> list[Path]:
+    """Save, for the pipeline and each rule, held-out cost against observed cost and
+    relative error against document length, for the model and the baseline"""
+    plt = _pyplot()
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    paths = []
+    series = {"pipeline": validation.pipeline_rows, **validation.rule_rows}
+    for name, rows in series.items():
+        usable = (
+            np.isfinite(rows.model) & np.isfinite(rows.baseline) & (rows.observed > 0)
+        )
+        if not usable.any():
+            continue
+        tokens, observed = rows.doc_tokens[usable], rows.observed[usable]
+        predictions = {"model": rows.model[usable], "baseline": rows.baseline[usable]}
+        fig, (scatter, residual) = plt.subplots(1, 2, figsize=(13, 5))
+        for label, predicted in predictions.items():
+            scatter.scatter(observed, predicted, s=6, alpha=0.3, label=label)
+            error = predicted / observed - 1
+            points = residual.scatter(tokens, error, s=6, alpha=0.2)
+            centres, medians = _binned_median(tokens, error)
+            residual.plot(
+                centres,
+                medians,
+                marker="o",
+                color=points.get_facecolor()[0][:3],
+                label=f"{label} (binned median)",
+            )
+        bounds = [observed.min(), observed.max()]
+        scatter.plot(bounds, bounds, color="black", linewidth=1, label="perfect")
+        scatter.set(
+            xscale="log",
+            yscale="log",
+            xlabel="Observed cost (GBP, no caching)",
+            ylabel="Held-out predicted cost (GBP)",
+            title=f"Observed vs predicted cost: {name}",
+        )
+        residual.axhline(0, color="black", linewidth=1)
+        residual.set(
+            xscale="log",
+            xlabel="Document tokens",
+            ylabel="Predicted / observed - 1",
+            title=f"Relative error vs document length: {name}",
+        )
+        for axis in (scatter, residual):
+            axis.grid(True, alpha=0.3)
+            axis.legend(fontsize=8)
+            axis.xaxis.set_minor_formatter(NullFormatter())
+        scatter.yaxis.set_minor_formatter(NullFormatter())
+        fig.tight_layout()
+        path = out_dir / f"cost_validation_{name}.png"
+        fig.savefig(path)
+        plt.close(fig)
+        paths.append(path)
+    return paths
+
+
+def _single_setting(
+    chunk_settings: ChunkSetting | dict[str, ChunkSetting],
+) -> ChunkSetting | None:
+    """The one chunk setting shared by every rule, if there is one"""
+    if not isinstance(chunk_settings, dict):
+        return chunk_settings
+    distinct = set(chunk_settings.values())
+    return distinct.pop() if len(distinct) == 1 else None
+
+
+def plot_cost_curve(
+    forecaster: CostForecaster,
+    chunk_settings: ChunkSetting | dict[str, ChunkSetting],
+    out_path: Path | str,
+    caching: CachingScenario = "prompt",
+    level: float = 0.95,
+) -> Path:
+    """Save the predicted cost of one document against its length, with both intervals.
+    Held-out observations at the same chunk setting are added when costs are priced
+    without caching, as they were"""
+    plt = _pyplot()
+    low, high = forecaster.pipeline.doc_token_range
+    grid = np.geomspace(low, high, 60)
+    forecast = forecaster.predict_documents(grid, chunk_settings, caching, level)
+
+    fig, axis = plt.subplots(figsize=(8, 5))
+    axis.fill_between(
+        grid,
+        forecast.pi_lower,
+        forecast.pi_upper,
+        alpha=0.2,
+        label=f"{level:.0%} prediction interval (one document)",
+    )
+    axis.fill_between(
+        grid,
+        forecast.ci_lower,
+        forecast.ci_upper,
+        alpha=0.5,
+        label=f"{level:.0%} interval on the expected cost",
+    )
+    axis.plot(grid, forecast.cost_gbp, color="black", label="expected cost")
+    setting = _single_setting(chunk_settings)
+    rows = forecaster.validation.pipeline_rows
+    if caching == "none" and setting is not None:
+        same = (
+            (rows.chunk_size == setting[0])
+            & (rows.chunk_overlap == setting[1])
+            & (rows.observed > 0)
+        )
+        axis.scatter(
+            rows.doc_tokens[same],
+            rows.observed[same],
+            s=10,
+            color="tab:red",
+            label="observed (held-out documents)",
+        )
+    axis.set(
+        xscale="log",
+        yscale="log",
+        xlabel="Document tokens",
+        ylabel=f"Pipeline cost per document (GBP, caching: {caching})",
+        title="Predicted cost against document length",
+    )
+    axis.grid(True, alpha=0.3)
+    axis.legend(fontsize=8)
+    fig.tight_layout()
+    out_path = Path(out_path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(out_path)
+    plt.close(fig)
+    return out_path
 
 
 def _terms(component: TokenComponent, digits: int) -> str:
@@ -983,6 +1631,60 @@ def describe(model: CostModel) -> str:
     return f"{header}\n{chunks}\n{input_line}\n{completion_line}\n{cached}"
 
 
+def _forecast_report(args: argparse.Namespace, forecaster: CostForecaster) -> str:
+    """Forecast the cost of the requested documents, and save the cost curve
+
+    :raises ValueError: If the chunk settings or document lengths are not given.
+    """
+    rules = list(forecaster.pipeline.models)
+    if (args.chunk_size is None) != (args.chunk_overlap is None):
+        raise ValueError("Give both --chunk-size and --chunk-overlap")
+    settings = {} if args.skip_config else production_settings(args.config, rules)
+    if args.chunk_size is not None:
+        chunk_settings = {rule: (args.chunk_size, args.chunk_overlap) for rule in rules}
+    elif settings:
+        chunk_settings = {
+            rule: (s.chunk_size, s.chunk_overlap) for rule, s in settings.items()
+        }
+    else:
+        raise ValueError("Give --chunk-size and --chunk-overlap with --skip-config")
+
+    if args.corpus:
+        model = next(iter(forecaster.pipeline.models.values())).config.model
+        lengths = corpus_token_lengths(args.corpus, args.split, model)
+    elif args.lengths:
+        lengths = read_lengths(args.lengths, args.characters, args.chars_per_token)
+    else:
+        raise ValueError("Give document lengths with --corpus or --lengths")
+
+    expected = forecaster.expected_cost(
+        lengths,
+        chunk_settings,
+        args.caching,
+        args.level,
+        args.batch_size,
+        args.seed,
+    )
+    lines = [
+        format_expected_cost(expected, lengths, forecaster.pipeline.doc_token_range)
+    ]
+    if settings:
+        lines += [
+            f"Warning: {warning}"
+            for warning in compatibility_warnings(forecaster.pipeline, settings)
+        ]
+    if args.plots_dir:
+        path = plot_cost_curve(
+            forecaster,
+            chunk_settings,
+            Path(args.plots_dir) / "cost_curve.png",
+            args.caching,
+            args.level,
+        )
+        lines.append(f"Wrote {path}")
+    return "\n".join(lines)
+
+
 def main(argv=None):
     """Fit models to sweep results, print a summary of each, and optionally validate"""
     parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
@@ -997,14 +1699,55 @@ def main(argv=None):
         type=int,
         help="Folds for --validate. Default: leave one document out",
     )
-    parser.add_argument("--model", help="Only validate configurations with this model")
-    parser.add_argument(
-        "--reasoning-effort", help="Only validate this reasoning effort"
-    )
+    parser.add_argument("--model", help="Only use configurations with this model")
+    parser.add_argument("--reasoning-effort", help="Only use this reasoning effort")
     parser.add_argument(
         "--include-rationale", action=argparse.BooleanOptionalAction, default=None
     )
     parser.add_argument("--max-completion-tokens", type=int)
+    parser.add_argument(
+        "--predict",
+        action="store_true",
+        help="Forecast the cost per document for a distribution of document lengths",
+    )
+    parser.add_argument("--corpus", help="Take document lengths from this corpus")
+    parser.add_argument("--split", choices=SPLITS, help="Only this corpus split")
+    parser.add_argument(
+        "--lengths", help="Take document lengths from a JSON array or a list of numbers"
+    )
+    parser.add_argument(
+        "--characters",
+        action="store_true",
+        help="--lengths are in characters, e.g. llm_character_count from run metrics",
+    )
+    parser.add_argument("--chars-per-token", type=float, default=4.0)
+    parser.add_argument(
+        "--config",
+        default="default",
+        help="Redaction config whose chunk settings are forecast, and checked against "
+        "the fitted configurations",
+    )
+    parser.add_argument(
+        "--skip-config",
+        action="store_true",
+        help="Don't read the redaction config. Needs --chunk-size and --chunk-overlap",
+    )
+    parser.add_argument("--chunk-size", type=int, help="Override every rule's size")
+    parser.add_argument(
+        "--chunk-overlap", type=int, help="Override every rule's overlap"
+    )
+    parser.add_argument(
+        "--caching", choices=get_args(CachingScenario), default="prompt"
+    )
+    parser.add_argument("--iterations", type=int, default=200, help="Bootstraps")
+    parser.add_argument("--level", type=float, default=0.95)
+    parser.add_argument(
+        "--batch-size", type=int, help="Documents in the next batch. Default: all given"
+    )
+    parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument(
+        "--plots-dir", help="Save validation plots, and the cost curve with --predict"
+    )
     args = parser.parse_args(argv)
 
     observations = build_observations(load_rows(args.results))
@@ -1013,22 +1756,39 @@ def main(argv=None):
         print(describe(models[config]))
     if not models:
         print("No rows found")
-    if args.validate and models:
-        filters = {
-            "model": args.model,
-            "reasoning_effort": args.reasoning_effort,
-            "include_rationale": args.include_rationale,
-            "max_completion_tokens": args.max_completion_tokens,
-        }
-        try:
-            selected = select_configs(
-                observations, **{k: v for k, v in filters.items() if v is not None}
+        return
+    if not (args.validate or args.predict or args.plots_dir):
+        return
+
+    filters = {
+        "model": args.model,
+        "reasoning_effort": args.reasoning_effort,
+        "include_rationale": args.include_rationale,
+        "max_completion_tokens": args.max_completion_tokens,
+    }
+    try:
+        selected = select_configs(
+            observations, **{k: v for k, v in filters.items() if v is not None}
+        )
+        forecaster = None
+        if args.predict:
+            forecaster = CostForecaster.fit(
+                selected, args.iterations, args.folds, args.seed
             )
+            validation = forecaster.validation
+        else:
             validation = cross_validate(selected, args.folds)
-        except ValueError as e:
-            parser.error(str(e))
-        print()
-        print(format_validation(validation))
+        if args.validate:
+            print()
+            print(format_validation(validation))
+        if args.plots_dir:
+            for path in plot_validation(validation, args.plots_dir):
+                print(f"Wrote {path}")
+        if forecaster:
+            print()
+            print(_forecast_report(args, forecaster))
+    except ValueError as e:
+        parser.error(str(e))
 
 
 if __name__ == "__main__":

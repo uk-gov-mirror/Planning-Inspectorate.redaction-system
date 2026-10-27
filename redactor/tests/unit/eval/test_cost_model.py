@@ -1,32 +1,46 @@
 import json
 import math
+from collections import Counter
 from unittest.mock import patch
 
 import numpy as np
 import pytest
 from eval import cost_model
+from eval.corpus import Document, write_corpus
 from eval.cost_model import (
     ChunkCountModel,
     CostConfig,
+    CostForecaster,
+    DocumentResampler,
     PipelineCostModel,
+    ProductionSettings,
     TokenPrices,
     assign_folds,
     band_index,
     band_labels,
+    bootstrap_pipeline_models,
     build_observations,
     cacheable_prefix_tokens,
+    compatibility_warnings,
     config_of,
+    corpus_token_lengths,
     cross_validate,
     error_metrics,
     fit_cost_model,
     fit_cost_models,
+    format_expected_cost,
     format_validation,
     load_rows,
     main,
+    plot_cost_curve,
+    plot_validation,
+    production_settings,
+    read_lengths,
     select_configs,
     single_pass_mask,
 )
 from eval.summarise_chunk_sweep import estimate_cost_gbp
+from tiktoken import get_encoding
 
 DOC_TOKENS = [400, 900, 1800, 3500, 6000, 9000, 14000, 20000]
 SETTINGS = [(1000, 40), (3000, 120)]
@@ -491,3 +505,372 @@ def test_main__validate_needs_one_configuration_per_rule(tmp_path):
     with pytest.raises(SystemExit):
         main(["--results", path, "--validate"])
     main(["--results", path, "--validate", "--max-completion-tokens", "4000"])
+
+
+def _noisy_rows(seed, doc_count=40):
+    """Documents with lognormal lengths, whose completion tokens scatter around the
+    model by a lognormal factor, so real costs spread around the prediction"""
+    rng = np.random.default_rng(seed)
+    lengths = np.clip(rng.lognormal(np.log(3000), 1.0, doc_count), 400, 20000)
+    rows = []
+    for rule, prompt_tokens in (("names", 1610), ("sensitive_info", 900)):
+        for index, tokens in enumerate(lengths.round()):
+            for size, overlap in SETTINGS:
+                row = _row(index, int(tokens), size, overlap, 0)
+                row |= {"rule": rule, "prompt_tokens": prompt_tokens}
+                row["completion_tokens"] *= math.exp(rng.normal(0, 0.3))
+                rows.append(row)
+    return rows
+
+
+def _true_costs(rows, setting):
+    """Document lengths and the real pipeline cost, without caching, at one setting"""
+    prices = TokenPrices.for_model("gpt-5.6-luna")
+    tokens, costs = {}, {}
+    for row in rows:
+        if (row["chunk_size"], row["chunk_overlap"]) == setting:
+            tokens[row["doc_id"]] = row["doc_tokens"]
+            costs[row["doc_id"]] = costs.get(row["doc_id"], 0) + prices.cost(
+                row["input_tokens"], 0.0, 0.0, row["completion_tokens"]
+            )
+    ids = sorted(tokens)
+    return np.array([tokens[i] for i in ids]), np.array([costs[i] for i in ids])
+
+
+def _forecaster(rows=None, iterations=10, seed=0):
+    selected = select_configs(build_observations(rows or _two_rule_rows()))
+    return CostForecaster.fit(selected, iterations=iterations, seed=seed)
+
+
+def test_document_resampler__keeps_documents_whole_and_aligned_across_rules():
+    """Each rule gets the same drawn documents, with every row of each, so a rule's
+    uncertainty is correlated with the others', as in a real pipeline"""
+    selected = select_configs(build_observations(_two_rule_rows()))
+    resampler = DocumentResampler(selected)
+
+    sample = resampler.sample(np.random.default_rng(0))
+
+    counts = [Counter(map(str, obs.doc_id)) for obs in sample.values()]
+    rows_per_document = len(_rows()) // len(DOC_TOKENS)
+    assert counts[0] == counts[1]
+    assert sum(counts[0].values()) == len(_rows())
+    assert all(n % rows_per_document == 0 for n in counts[0].values())
+    again = resampler.sample(np.random.default_rng(0))
+    assert all(np.array_equal(sample[c].doc_id, again[c].doc_id) for c in sample)
+
+
+def test_bootstrap_pipeline_models__one_pipeline_per_iteration():
+    selected = select_configs(build_observations(_two_rule_rows()))
+
+    replicates = bootstrap_pipeline_models(selected, iterations=5, seed=1)
+
+    assert len(replicates) == 5
+    assert all(set(r.models) == {"names", "sensitive_info"} for r in replicates)
+
+
+def test_cost_forecaster__fit_needs_an_iteration():
+    selected = select_configs(build_observations(_two_rule_rows()))
+
+    with pytest.raises(ValueError, match="at least one bootstrap"):
+        CostForecaster.fit(selected, iterations=0)
+
+
+def test_cost_forecaster__prediction_interval_covers_new_documents():
+    """
+    - Given costs that scatter around the model by a known relative amount
+    - When I forecast a fresh set of documents from the same process
+    - Then about the nominal share of their real costs fall inside the prediction
+      interval, which is wider than the interval on the expected cost
+    """
+    forecaster = _forecaster(_noisy_rows(seed=1), iterations=60, seed=3)
+    tokens, truth = _true_costs(_noisy_rows(seed=2, doc_count=300), (1000, 40))
+
+    forecast = forecaster.predict_documents(tokens, (1000, 40), "none", level=0.9)
+
+    inside = (truth >= forecast.pi_lower) & (truth <= forecast.pi_upper)
+    assert 0.75 <= inside.mean() <= 0.99
+    assert (forecast.ci_lower <= forecast.ci_upper).all()
+    assert (forecast.pi_upper - forecast.pi_lower).mean() > (
+        forecast.ci_upper - forecast.ci_lower
+    ).mean()
+
+
+def test_cost_forecaster__predict_documents_is_reproducible():
+    forecaster = _forecaster()
+
+    first = forecaster.predict_documents([900, 5000], (1000, 40), "none", seed=5)
+    second = forecaster.predict_documents([900, 5000], (1000, 40), "none", seed=5)
+
+    assert np.array_equal(first.pi_lower, second.pi_lower)
+    assert first.level == 0.95
+    assert first.cost_gbp.shape == (2,)
+
+
+def test_cost_forecaster__flags_lengths_outside_the_fitted_range():
+    forecaster = _forecaster()
+
+    forecast = forecaster.predict_documents([100, 900, 50000], (1000, 40), "none")
+    expected = forecaster.expected_cost(
+        np.array([100, 900, 900, 50000]), (1000, 40), "none"
+    )
+
+    assert forecaster.pipeline.doc_token_range == (400, 20000)
+    assert forecast.in_range.tolist() == [False, True, False]
+    assert expected.out_of_range_share == pytest.approx(0.5)
+
+
+def test_cost_forecaster__draws_errors_from_documents_of_a_similar_length():
+    """Short documents' errors come from short documents. A band with too few held-out
+    errors falls back to all of them"""
+    forecaster = _forecaster().model_copy(
+        update={
+            "ratios": np.array([0.5] * 30 + [2.0] * 30 + [7.0] * 5),
+            "ratio_tokens": np.array([500] * 30 + [5000] * 30 + [50000] * 5),
+        }
+    )
+    rng = np.random.default_rng(0)
+
+    drawn = forecaster._draw_ratios(np.array([600, 6000, 60000, 60000]), rng)
+
+    assert drawn[:2].tolist() == [0.5, 2.0]
+    assert set(drawn[2:]) <= {0.5, 2.0, 7.0}
+
+
+def test_cost_forecaster__expected_cost_averages_over_lengths():
+    """
+    - Given lengths where most documents are short and some are long
+    - When I forecast the expected cost
+    - Then the mean cost exceeds the cost of a document of the mean length, because
+      every document pays a fixed per-chunk cost, and the intervals bracket the mean
+    """
+    forecaster = _forecaster(iterations=30)
+    lengths = np.array([400] * 70 + [5000] * 30)
+
+    expected = forecaster.expected_cost(
+        lengths, (3000, 120), "none", level=0.9, batch_size=50
+    )
+
+    assert expected.mean_cost_gbp > expected.cost_at_mean_length_gbp * 1.03
+    assert (
+        expected.mean_interval[0] < expected.mean_cost_gbp < expected.mean_interval[1]
+    )
+    assert expected.total_cost_gbp == pytest.approx(50 * expected.mean_cost_gbp)
+    assert expected.total_interval[0] < expected.total_cost_gbp
+    assert expected.total_cost_gbp < expected.total_interval[1]
+    assert (expected.documents, expected.batch_size) == (100, 50)
+    assert expected.out_of_range_share == 0
+    assert sum(expected.by_rule_gbp.values()) == pytest.approx(expected.mean_cost_gbp)
+
+
+def test_cost_forecaster__expected_cost_needs_lengths():
+    with pytest.raises(ValueError, match="at least one document length"):
+        _forecaster().expected_cost(np.array([]), (1000, 40))
+
+
+def test_compatibility_warnings():
+    pipeline = PipelineCostModel(models={"names": _fitted()})
+
+    def settings(**overrides):
+        base = {
+            "chunk_size": 1000,
+            "chunk_overlap": 40,
+            "model": "gpt-5.6-luna",
+            "max_tokens": 4000,
+            "reasoning_effort": None,
+            "include_rationale": False,
+            "prompt_tokens": 1610,
+        }
+        return ProductionSettings(**(base | overrides))
+
+    assert compatibility_warnings(pipeline, {"names": settings()}) == []
+    warnings = compatibility_warnings(
+        pipeline, {"names": settings(max_tokens=2000, prompt_tokens=1700)}
+    )
+    assert len(warnings) == 2
+    assert "max_completion_tokens=4000 but production uses 2000" in warnings[0]
+    assert "prompt_tokens=1610 but production uses 1700" in warnings[1]
+    assert compatibility_warnings(pipeline, {}) == [
+        "names: not in the production config"
+    ]
+
+
+def test_production_settings__reads_the_redaction_config():
+    settings = production_settings("default", ["names"])["names"]
+
+    assert settings.chunk_size > settings.chunk_overlap >= 0
+    assert settings.prompt_tokens > 0
+    with pytest.raises(ValueError, match="not_a_rule"):
+        production_settings("default", ["not_a_rule"])
+
+
+@pytest.mark.parametrize(
+    ("contents", "expected"),
+    [
+        ("[100, 250.5]", [100, 250.5]),
+        ("100\n250\n300", [100, 250, 300]),
+        ("100 250", [100, 250]),
+        ("640", [640]),
+    ],
+)
+def test_read_lengths(tmp_path, contents, expected):
+    (tmp_path / "lengths.txt").write_text(contents, encoding="utf-8")
+
+    assert read_lengths(tmp_path / "lengths.txt").tolist() == expected
+
+
+def test_read_lengths__converts_characters_to_tokens(tmp_path):
+    (tmp_path / "chars.txt").write_text("[4000, 8000]", encoding="utf-8")
+
+    lengths = read_lengths(tmp_path / "chars.txt", characters=True, chars_per_token=4)
+
+    assert lengths.tolist() == [1000, 2000]
+
+
+@pytest.mark.parametrize("contents", ["[]", "[100, 0]", "[-5]"])
+def test_read_lengths__rejects_empty_or_non_positive(tmp_path, contents):
+    (tmp_path / "lengths.txt").write_text(contents, encoding="utf-8")
+
+    with pytest.raises(ValueError, match="positive document length"):
+        read_lengths(tmp_path / "lengths.txt")
+
+
+def test_corpus_token_lengths__counts_tokens_for_the_split(tmp_path):
+    texts = {"a": "The cable route crosses two fields.", "b": "Short.", "c": "x " * 80}
+    documents = [
+        Document(id=name, doc_type="test", text=text, split=split)
+        for (name, text), split in zip(texts.items(), ["dev", "dev", "test"])
+    ]
+    write_corpus(tmp_path / "corpus.jsonl", documents)
+    encoding = get_encoding("o200k_base")
+
+    dev = corpus_token_lengths(tmp_path / "corpus.jsonl", "dev", "gpt-5.6-luna")
+    everything = corpus_token_lengths(tmp_path / "corpus.jsonl", None, "gpt-5.6-luna")
+
+    assert dev.tolist() == [len(encoding.encode(texts[n])) for n in ("a", "b")]
+    assert len(everything) == 3
+
+
+def test_format_expected_cost():
+    forecaster = _forecaster()
+    lengths = np.array([400, 900, 3500, 9000])
+    expected = forecaster.expected_cost(lengths, (1000, 40), "none")
+
+    text = format_expected_cost(expected, lengths, forecaster.pipeline.doc_token_range)
+
+    assert "Expected cost per document (caching: none, 95% intervals)" in text
+    assert "4 documents; tokens min 400, median 2,200, mean 3,450, max 9,000" in text
+    assert "fitted range 400-20,000 tokens; 0.0% of documents are outside it" in text
+    assert "against the mean cost" in text
+    assert "next 4 documents" in text
+    assert "by rule: names" in text
+
+
+def test_plot_validation__writes_a_plot_for_the_pipeline_and_each_rule(tmp_path):
+    validation = cross_validate(select_configs(build_observations(_two_rule_rows())))
+
+    paths = plot_validation(validation, tmp_path / "plots")
+
+    assert sorted(path.name for path in paths) == [
+        "cost_validation_names.png",
+        "cost_validation_pipeline.png",
+        "cost_validation_sensitive_info.png",
+    ]
+    assert all(path.stat().st_size > 0 for path in paths)
+
+
+@pytest.mark.parametrize("caching", ["none", "prompt"])
+def test_plot_cost_curve(tmp_path, caching):
+    forecaster = _forecaster(iterations=5)
+
+    path = plot_cost_curve(
+        forecaster, (1000, 40), tmp_path / "plots" / "curve.png", caching
+    )
+
+    assert path.stat().st_size > 0
+
+
+def test_main__predict_from_a_lengths_file(tmp_path, capsys):
+    _write(tmp_path / "results.jsonl", _two_rule_rows())
+    (tmp_path / "lengths.txt").write_text("[400, 900, 3000, 12000]", encoding="utf-8")
+
+    main(
+        [
+            *["--results", str(tmp_path / "results.jsonl"), "--predict"],
+            *["--lengths", str(tmp_path / "lengths.txt"), "--skip-config"],
+            *["--chunk-size", "1000", "--chunk-overlap", "40"],
+            *["--iterations", "10", "--caching", "none"],
+            *["--plots-dir", str(tmp_path / "plots")],
+        ]
+    )
+
+    out = capsys.readouterr().out
+    assert "Expected cost per document (caching: none" in out
+    assert "by rule: names" in out
+    assert "Warning" not in out
+    assert (tmp_path / "plots" / "cost_curve.png").exists()
+    assert (tmp_path / "plots" / "cost_validation_pipeline.png").exists()
+
+
+def test_main__predict_from_a_corpus(tmp_path, capsys):
+    _write(tmp_path / "results.jsonl", _two_rule_rows())
+    documents = [
+        Document(id=f"d{i}", doc_type="test", text="word " * (200 * i), split="dev")
+        for i in range(1, 4)
+    ]
+    write_corpus(tmp_path / "corpus.jsonl", documents)
+
+    main(
+        [
+            *["--results", str(tmp_path / "results.jsonl"), "--predict"],
+            *["--corpus", str(tmp_path / "corpus.jsonl"), "--split", "dev"],
+            *["--skip-config", "--chunk-size", "1000", "--chunk-overlap", "40"],
+            *["--iterations", "5"],
+        ]
+    )
+
+    assert "3 documents" in capsys.readouterr().out
+
+
+def test_main__predict_uses_the_production_chunk_settings(tmp_path, capsys):
+    _write(tmp_path / "results.jsonl", _two_rule_rows())
+    (tmp_path / "lengths.txt").write_text("[900, 3000]", encoding="utf-8")
+
+    main(
+        [
+            *["--results", str(tmp_path / "results.jsonl"), "--predict"],
+            *["--lengths", str(tmp_path / "lengths.txt"), "--iterations", "5"],
+        ]
+    )
+
+    assert "Expected cost per document (caching: prompt" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize(
+    ("extra_args", "message"),
+    [
+        (
+            ["--skip-config", "--chunk-size", "1000", "--chunk-overlap", "40"],
+            "--lengths",
+        ),
+        (["--lengths", "{lengths}", "--skip-config"], "--chunk-size"),
+        (["--lengths", "{lengths}", "--chunk-size", "1000"], "both --chunk-size"),
+    ],
+)
+def test_main__predict_needs_lengths_and_chunk_settings(
+    tmp_path, capsys, extra_args, message
+):
+    _write(tmp_path / "results.jsonl", _two_rule_rows())
+    (tmp_path / "lengths.txt").write_text("[900]", encoding="utf-8")
+    extra = [
+        arg.replace("{lengths}", str(tmp_path / "lengths.txt")) for arg in extra_args
+    ]
+
+    with pytest.raises(SystemExit):
+        main(
+            [
+                *["--results", str(tmp_path / "results.jsonl"), "--predict"],
+                *["--iterations", "5", *extra],
+            ]
+        )
+
+    assert message in capsys.readouterr().err
