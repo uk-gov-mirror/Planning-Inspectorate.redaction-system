@@ -233,6 +233,7 @@ class TokenComponent(BaseModel):
     """Fit quality on the single-pass rows used to estimate the coefficients"""
     single_pass_rows: int
     inflation: dict[ChunkSetting, float] = Field(default_factory=dict)
+    """Inflation factors for each chunk setting, indicating how much observed token counts exceed single-pass predictions"""
     pooled_inflation: float = 1.0
     """Used for chunk settings that were not swept"""
 
@@ -293,7 +294,11 @@ def _r_squared(target: np.ndarray, predicted: np.ndarray) -> float:
 def _inflation(
     observations: CostObservations, observed: np.ndarray, predicted: np.ndarray
 ) -> tuple[dict[ChunkSetting, float], float]:
-    """Total observed over total single-pass prediction, per chunk setting and pooled"""
+    """Measures inflation factors for each chunk setting, pooled across all rows: how
+    much the observed token counts exceed the predicted counts for single-pass rows.
+
+
+    """
     by_setting = {}
     for size, overlap in observations.chunk_settings:
         in_setting = (observations.chunk_size == size) & (
@@ -318,8 +323,11 @@ def single_pass_mask(
     )
     mask = observations.failed_chunks == 0
     for _ in range(3):
+        # Fit a linear model to the input tokens for the current mask of single-pass rows
         coefficients = _least_squares(features[mask], observations.input_tokens[mask])
+        # Compute the ratio of observed to predicted input tokens for all rows
         ratio = observations.input_tokens / (features @ coefficients)
+        # Identify rows that are within the tolerance of the predicted input tokens
         new_mask = (observations.failed_chunks == 0) & (ratio <= 1 + tolerance)
         if np.array_equal(new_mask, mask):
             break
@@ -337,6 +345,8 @@ def fit_component(
     """Fit coefficients on single-pass rows, then inflation on every row"""
     coefficients = _least_squares(features[single_pass], target[single_pass])
     predicted = features @ coefficients
+
+    # Compute inflation factors for each chunk setting and pooled across all rows
     inflation, pooled = _inflation(observations, target, predicted)
     return TokenComponent(
         feature_names=names,
@@ -442,8 +452,11 @@ class CostModel(BaseModel):
     input_tokens: TokenComponent
     completion_tokens: TokenComponent
     doc_token_range: tuple[float, float]
+    """Range of document token counts the model was fitted on"""
     rows: int
+    """Number of rows in the dataset"""
     documents: int
+    """Number of documents in the dataset"""
     sweep_cached_share: float
     """Cached share of input in the sweep. Inflated by identical requests repeated
     across repeats and settings, so not a production estimate"""
@@ -513,7 +526,11 @@ class CostModel(BaseModel):
 
 def fit_cost_model(config: CostConfig, observations: CostObservations) -> CostModel:
     """Fit the chunk-count, input and completion models for one configuration"""
+
+    # Filter to fit input/output components on single-pass (no retry) observations only
     single_pass = single_pass_mask(observations)
+
+    # Fit input token component: ``a*n + b*T + c*(n - 1)*O``
     input_component = fit_component(
         observations,
         input_features(
@@ -525,6 +542,8 @@ def fit_cost_model(config: CostConfig, observations: CostObservations) -> CostMo
         INPUT_FEATURES,
         single_pass,
     )
+
+    # Fit completion token component (including reasoning): ``a*n + b*T``
     completion_component = fit_component(
         observations,
         completion_features(observations.chunk_count, observations.doc_tokens),
@@ -532,9 +551,16 @@ def fit_cost_model(config: CostConfig, observations: CostObservations) -> CostMo
         COMPLETION_FEATURES,
         single_pass,
     )
+
+    # Fit chunk count model: ``max(1, ceil(scale * (T - O) / (C - O)))``
+    # Scale factor is fitted from observations because the splitter breaks at separators
+    # and chunk boundaries may not align perfectly with the desired chunk size
+    chunk_component = ChunkCountModel.fit(observations)
+
+    # Return the fitted cost model for the given configuration
     return CostModel(
         config=config,
-        chunk_count=ChunkCountModel.fit(observations),
+        chunk_count=chunk_component,
         input_tokens=input_component,
         completion_tokens=completion_component,
         doc_token_range=(
@@ -815,23 +841,31 @@ def _cross_validate_rule(
 ) -> dict[str, np.ndarray]:
     """Held-out predictions for every row, NaN where no model could be fitted"""
     count = len(observations)
+
+    # Determine the fold assignment for each row based on the document ID
     row_fold = np.array([fold_of[str(doc_id)] for doc_id in observations.doc_id])
     observed_cost = prices.cost(
         observations.input_tokens, 0.0, 0.0, observations.completion_tokens
     )
+
     predicted_input = np.full(count, np.nan)
     predicted_completion = np.full(count, np.nan)
     baseline = np.full(count, np.nan)
     for fold in range(n_folds):
+        # Identify held-out rows for the current fold and split into training and test sets
         test_rows = row_fold == fold
         if not test_rows.any() or test_rows.all():
             continue
         train, test = observations.select(~test_rows), observations.select(test_rows)
+
+        # Fit the cost model on the training set and predict costs for the test set
         model = fit_cost_model(config, train)
         predicted_input[test_rows], predicted_completion[test_rows] = _predict_rows(
             model, test
         )
+        # Compute the baseline cost for the test set using the training set as reference
         baseline[test_rows] = _baseline_cost(train, observed_cost[~test_rows], test)
+
     return {
         "observed_cost": observed_cost,
         "predicted_input": predicted_input,
@@ -1157,16 +1191,23 @@ class CostForecaster(BaseModel):
         """
         if iterations < 1:
             raise ValueError("Need at least one bootstrap iteration")
+
+        # Perform cross-validation to get held-out errors for the documents
         validation = cross_validate(selected, folds, length_edges)
         rows = validation.pipeline_rows
+
+        # Identify usable rows with finite and positive model and observed costs
         usable = np.isfinite(rows.model) & (rows.model > 0) & (rows.observed > 0)
         if not usable.any():
             raise ValueError("No held-out costs to calibrate the intervals from")
+
+        # Fit full pipeline cost model on the selected observations
         models = fit_cost_models(selected)
+        pipeline = PipelineCostModel(
+            models={config.rule: model for config, model in models.items()}
+        )
         return cls(
-            pipeline=PipelineCostModel(
-                models={config.rule: model for config, model in models.items()}
-            ),
+            pipeline=pipeline,
             replicates=bootstrap_pipeline_models(selected, iterations, seed),
             validation=validation,
             ratios=rows.observed[usable] / rows.model[usable],
@@ -1634,11 +1675,11 @@ def describe(model: CostModel) -> str:
     input_line = (
         f"  input: {_terms(input_c, 3)}; R2 {input_c.r_squared:.4f} on "
         f"{input_c.single_pass_rows} single-pass rows; "
-        f"setting factor {_factor_range(input_c)}"
+        f"setting (inflation) factor {_factor_range(input_c)}"
     )
     completion_line = (
         f"  completion: {_terms(completion_c, 4)}; R2 {completion_c.r_squared:.3f}; "
-        f"setting factor {_factor_range(completion_c)}"
+        f"setting (inflation) factor {_factor_range(completion_c)}"
     )
     cached = (
         f"  sweep cached share {model.sweep_cached_share:.1%} "
@@ -1776,6 +1817,7 @@ def main(argv=None):
     )
     args = parser.parse_args(argv)
 
+    # Load and filter rows based on chunk size and overlap before building observations
     rows = [
         row
         for row in load_rows(args.results)
@@ -1783,6 +1825,8 @@ def main(argv=None):
         and args.fit_chunk_overlap in (None, row["chunk_overlap"])
     ]
     observations = build_observations(rows)
+
+    # Fit cost models for each prompt configuration on the observations
     models = fit_cost_models(observations)
     for config in sorted(models, key=lambda c: (c.rule, str(c))):
         print(describe(models[config]))
@@ -1799,6 +1843,7 @@ def main(argv=None):
         "max_completion_tokens": args.max_completion_tokens,
     }
     try:
+        # Filter selected configurations based on the provided filters
         selected = select_configs(
             observations, **{k: v for k, v in filters.items() if v is not None}
         )
