@@ -507,6 +507,23 @@ def test_main__validate_needs_one_configuration_per_rule(tmp_path):
     main(["--results", path, "--validate", "--max-completion-tokens", "4000"])
 
 
+def test_main__fits_only_the_requested_chunk_settings(tmp_path, capsys):
+    _write(tmp_path / "results.jsonl", _two_rule_rows())
+    path = str(tmp_path / "results.jsonl")
+
+    main(["--results", path, "--fit-chunk-size", "1000", "--fit-chunk-overlap", "40"])
+    fitted = capsys.readouterr().out
+    main(["--results", path, "--fit-chunk-size", "3000"])
+    one_size = capsys.readouterr().out
+    main(["--results", path, "--fit-chunk-size", "1234"])
+    none = capsys.readouterr().out
+
+    assert "16 rows, 8 documents" in fitted
+    assert "16 rows, 8 documents" in one_size
+    assert "32 rows" not in fitted + one_size
+    assert none.strip() == "No rows found"
+
+
 def _noisy_rows(seed, doc_count=40):
     """Documents with lognormal lengths, whose completion tokens scatter around the
     model by a lognormal factor, so real costs spread around the prediction"""

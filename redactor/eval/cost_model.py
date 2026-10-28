@@ -42,7 +42,7 @@ from pathlib import Path
 from typing import Literal, get_args
 
 import numpy as np
-from matplotlib.ticker import NullFormatter
+from matplotlib.ticker import FuncFormatter
 from pydantic import BaseModel, ConfigDict, Field
 from tiktoken import get_encoding
 
@@ -1446,6 +1446,20 @@ def _pyplot():
     return plt
 
 
+def _plain_log_axis(axis) -> None:
+    """Label a log axis with plain numbers, including minor ticks at 2 and 5"""
+
+    def plain(value, _):
+        return f"{value:g}"
+
+    def minor(value, _):
+        return f"{value:g}" if f"{value:.1e}"[0] in "25" else ""
+
+    axis.set_major_formatter(FuncFormatter(plain))
+    axis.set_minor_formatter(FuncFormatter(minor))
+    axis.set_tick_params(which="minor", labelsize=7)
+
+
 def _binned_median(
     x: np.ndarray, y: np.ndarray, bins: int = 8, minimum: int = 3
 ) -> tuple[list[float], list[float]]:
@@ -1507,8 +1521,8 @@ def plot_validation(validation: Validation, out_dir: Path | str) -> list[Path]:
         for axis in (scatter, residual):
             axis.grid(True, alpha=0.3)
             axis.legend(fontsize=8)
-            axis.xaxis.set_minor_formatter(NullFormatter())
-        scatter.yaxis.set_minor_formatter(NullFormatter())
+            _plain_log_axis(axis.xaxis)
+        _plain_log_axis(scatter.yaxis)
         fig.tight_layout()
         path = out_dir / f"cost_validation_{name}.png"
         fig.savefig(path)
@@ -1582,6 +1596,8 @@ def plot_cost_curve(
     )
     axis.grid(True, alpha=0.3)
     axis.legend(fontsize=8)
+    _plain_log_axis(axis.xaxis)
+    _plain_log_axis(axis.yaxis)
     fig.tight_layout()
     out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1706,6 +1722,16 @@ def main(argv=None):
     )
     parser.add_argument("--max-completion-tokens", type=int)
     parser.add_argument(
+        "--fit-chunk-size",
+        type=int,
+        help="Only fit to sweep rows with this chunk size",
+    )
+    parser.add_argument(
+        "--fit-chunk-overlap",
+        type=int,
+        help="Only fit to sweep rows with this chunk overlap",
+    )
+    parser.add_argument(
         "--predict",
         action="store_true",
         help="Forecast the cost per document for a distribution of document lengths",
@@ -1750,7 +1776,13 @@ def main(argv=None):
     )
     args = parser.parse_args(argv)
 
-    observations = build_observations(load_rows(args.results))
+    rows = [
+        row
+        for row in load_rows(args.results)
+        if args.fit_chunk_size in (None, row["chunk_size"])
+        and args.fit_chunk_overlap in (None, row["chunk_overlap"])
+    ]
+    observations = build_observations(rows)
     models = fit_cost_models(observations)
     for config in sorted(models, key=lambda c: (c.rule, str(c))):
         print(describe(models[config]))
