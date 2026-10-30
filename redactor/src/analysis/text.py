@@ -4,7 +4,7 @@ import os
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from threading import Lock, Semaphore
-from typing import ClassVar
+from typing import ClassVar, Literal
 
 from azure.identity import (
     AzureCliCredential,
@@ -69,6 +69,9 @@ class LLMTextAnalyserConfig(BaseModel):
     model: str
     """The LLM model to use"""
     max_tokens: int | None = 1000
+    """Maximum number of tokens per completion, including reasoning tokens"""
+    reasoning_effort: Literal["minimal", "low", "medium", "high"] | None = None
+    """Reasoning effort for reasoning models. None uses the model's default"""
     request_rate_limit: int | None = None
     """Maximum number of requests per minute. Defaults to 20% of model max RPM."""
     token_rate_limit: int | None = None
@@ -269,6 +272,8 @@ class LLMTextAnalyser:
             "response_format": response_format,
             "max_completion_tokens": max_completion_tokens,
         }
+        if self.config.reasoning_effort:
+            kwargs["reasoning_effort"] = self.config.reasoning_effort
 
         return self.llm.chat.completions.parse(**kwargs)
 

@@ -74,6 +74,31 @@ def test__llm_text_analyser__invoke_chain__has_correct_response_format():
     assert formatted_result.some_strings
 
 
+def test__llm_text_analyser__invoke_chain__with_reasoning_effort():
+    """
+    Assert that a reasoning model accepts a configured reasoning_effort
+
+    - Given an analyser config with a reasoning effort set
+    - When we invoke the LLMTextAnalyser
+    - Then we should receive a parsed completion in our supplied result format
+    """
+    llm_text_analyser_config = LLMTextAnalyserConfig(
+        model="gpt-5.6-luna", reasoning_effort="low", max_tokens=4000
+    )
+    llm_text_analyser_inst = LLMTextAnalyser(llm_text_analyser_config)
+
+    api_messages = [
+        {"role": "system", "content": "Respond with a json list"},
+        {"role": "user", "content": "Hello there"},
+    ]
+    completion = llm_text_analyser_inst.invoke_chain(
+        api_messages, SampleResultFormat, llm_text_analyser_config.max_tokens
+    )
+
+    assert isinstance(completion, ParsedChatCompletion)
+    assert isinstance(completion.choices[0].message.parsed, SampleResultFormat)
+
+
 def test__llm_text_analyser__analyse_text():
     llm_text_analyser_config = LLMTextAnalyserConfig(
         model="gpt-5.6-luna",
