@@ -90,6 +90,36 @@ def test_llm_text_redaction_config__default_chunk_settings():
     assert config.chunk_overlap == 60
 
 
+def test_llm_text_redaction_config__default_completion_settings():
+    """
+    - Given I create an llm redaction config without completion settings
+    - Then the default token limit applies and reasoning effort is left unset
+    """
+    config = _create_config()
+
+    assert config.max_tokens == 1000
+    assert config.reasoning_effort is None
+
+
+def test_llm_text_redaction_config__completion_settings():
+    """
+    - Given I create an llm redaction config with a token limit and reasoning effort
+    - Then both should be set, including when copied with an override as the sweep does
+    """
+    config = _create_config(max_tokens=4000, reasoning_effort="low")
+
+    assert config.max_tokens == 4000
+    assert config.reasoning_effort == "low"
+    assert config.model_copy(
+        update={"reasoning_effort": "minimal"}
+    ).reasoning_effort == ("minimal")
+
+
+def test_llm_text_redaction_config__invalid_reasoning_effort():
+    with pytest.raises(ValidationError):
+        _create_config(reasoning_effort="extreme")
+
+
 def test_llm_text_redaction_config__invalid_chunk_overlap():
     """
     - Given I create an llm redaction config with an overlap not smaller than the chunk size
