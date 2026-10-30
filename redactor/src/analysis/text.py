@@ -52,13 +52,13 @@ def handle_last_retry_error(retry_state):
 def update_max_tokens(retry_state):
     # Double max completions for next retry attempt, up to max of 8000
     # Only used when LengthFinishReasonError is raised
-    retry_state.kwargs.update(
-        {
-            "max_completion_tokens": min(
-                retry_state.kwargs.get("max_completion_tokens", 1000) * 2, 8000
-            )
-        }
+    # On the first retry the kwarg is unset, so start from the analyser's own limit
+    current = (
+        retry_state.kwargs.get("max_completion_tokens")
+        or retry_state.args[0].config.max_tokens
+        or 1000
     )
+    retry_state.kwargs.update({"max_completion_tokens": min(current * 2, 8000)})
     LoggingUtil().log_info(
         f"Updating max_completion_tokens to {retry_state.kwargs['max_completion_tokens']}"
         " for next attempt."
