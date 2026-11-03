@@ -1,7 +1,7 @@
 from openai.types.chat.parsed_chat_completion import ParsedChatCompletion
 from pydantic import BaseModel
 
-from src.analysis.text import LLMTextAnalyser, LLMTextAnalyserConfig
+from src.analysis.text import LLMTextAnalyser, LLMTextAnalyserConfig, get_chunk_id
 from src.types import LLMTextRedactionResult
 
 
@@ -171,3 +171,41 @@ def test__llm_text_analyser__analyse_text__workers_capped_by_chunk_count():
     assert isinstance(result, LLMTextRedactionResult)
     assert result.metadata.request_count == 2
     assert set(result.redaction_strings) == {"SECRET123", "CONFIDENTIAL456"}
+
+
+def test__llm_text_analyser__analyse_text__include_rationale_traces_chunks():
+    """
+    - Given an analyser with include_rationale enabled and two chunks that each
+      contain a different secret
+    - When the chunks are analysed by the LLM in parallel
+    - Then every chunk is summarised with its stable ID, and each decision's
+      occurrences point back to the chunk containing the span
+    """
+    llm_text_analyser_inst = LLMTextAnalyser(
+        LLMTextAnalyserConfig(
+            model="gpt-5.6-luna",
+            include_rationale=True,
+            max_tokens=2000,
+            max_concurrent_requests=2,
+        )
+    )
+    text_chunks = [
+        "This text contains SECRET123.",
+        "This text contains CONFIDENTIAL456.",
+    ]
+
+    result = llm_text_analyser_inst.analyse_text(
+        "Identify redaction strings in the text. Cite clause T1 for each one.",
+        text_chunks,
+    )
+
+    assert result.chunk_summaries == tuple(
+        {"chunk_index": i, "chunk_id": get_chunk_id(chunk), "status": "ok"}
+        for i, chunk in enumerate(text_chunks)
+    )
+    assert result.redaction_decisions
+    for decision in result.redaction_decisions:
+        for occurrence in decision["occurrences"]:
+            chunk = text_chunks[occurrence["chunk_index"]]
+            assert occurrence["chunk_id"] == get_chunk_id(chunk)
+            assert decision["text"] in chunk

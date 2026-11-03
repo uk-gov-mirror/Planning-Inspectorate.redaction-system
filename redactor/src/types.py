@@ -153,11 +153,15 @@ class LLMTextRedactionResult(TextRedactionResult):
     metadata: LLMResultMetadata = field(default=None)
     """Any metadata provided by the LLM"""
     redaction_decisions: tuple[dict, ...] = field(default_factory=tuple)
-    """Per-span reasons for each redaction string, merged across chunks. Only set
-    when the analyser's include_rationale is enabled"""
+    """Per-span reasons for each redaction string, merged across chunks with one
+    occurrence per chunk. Only set when the analyser's include_rationale is enabled"""
     excluded_decisions: tuple[dict, ...] = field(default_factory=tuple)
-    """Spans the LLM considered but kept under a DoNotRedact clause. Only set when
-    the analyser's include_rationale is enabled"""
+    """Spans the LLM considered but kept under a DoNotRedact clause, flagged when
+    another chunk redacted them. Only set when the analyser's include_rationale is
+    enabled"""
+    chunk_summaries: tuple[dict, ...] = field(default_factory=tuple)
+    """The index, stable ID and status ("ok", "failed" or "skipped") of each chunk
+    sent to the LLM"""
 
 
 @dataclass(frozen=True)
