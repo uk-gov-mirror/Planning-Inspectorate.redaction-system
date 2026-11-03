@@ -194,7 +194,7 @@ class TestSaveDictToBlobJSON:
     def test_writes_to_redaction_storage(self):
         redactions_dict = [
             {
-                "pageNumber": 0,
+                "pageNumber": 1,
                 "annotationType": "Highlight",
                 "proposedRedaction": "something",
                 "annotatedText": "something",
@@ -358,7 +358,7 @@ class TestCompareRedactions:
             "fileName": "somefile.pdf",
             "proposedRedactions": [
                 {
-                    "pageNumber": 0,
+                    "pageNumber": 1,
                     "annotations": [
                         {
                             "annotationType": "Highlight",  # True positive
@@ -410,7 +410,7 @@ class TestCompareRedactions:
             "fileName": "somefile-1.pdf",
             "finalRedactions": [
                 {
-                    "pageNumber": 0,
+                    "pageNumber": 1,
                     "annotations": [
                         {
                             "annotationType": "Highlight",  # True positive

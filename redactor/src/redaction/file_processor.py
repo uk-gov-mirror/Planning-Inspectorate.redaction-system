@@ -260,7 +260,8 @@ class PDFProcessor(FileProcessor):
         annotations_list = []
         for page in annotations:
             page_dict = {
-                "pageNumber": int(page.pop("page_number", 0)),
+                # pymupdf pages are 0-based, but outputs number pages from 1
+                "pageNumber": int(page.pop("page_number", 0)) + 1,
                 "annotations": [],
             }
             for annot in page.get("annotations", []):
