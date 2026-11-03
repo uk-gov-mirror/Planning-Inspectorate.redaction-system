@@ -34,6 +34,9 @@ class MockRedactor:
     def get_proposed_redactions(self):
         pass
 
+    def get_redaction_rationale(self):
+        pass
+
     def get_final_redactions(self):
         pass
 
@@ -259,10 +262,20 @@ class TestRedact:
             mock_datetime.now.return_value = datetime(2024, 1, 1, tzinfo=UTC)
             yield
 
-    def test_redact(self):
-        payload = {
-            "tryApplyProvisionalRedactions": True,
-            "skipRedaction": False,
+    @staticmethod
+    def _create_manager() -> RedactionManager:
+        inst = RedactionManager()
+        inst.job_id = "inst"
+        inst.stage = "ANALYSE"
+        inst.folder_for_job = "instfolder"
+        inst.storage_name = STORAGE_NAME
+        inst.runtime_errors = []
+        return inst
+
+    @staticmethod
+    def _create_payload(skip_redaction: bool = False) -> dict:
+        return {
+            "skipRedaction": skip_redaction,
             "configName": "myconfig",
             "fileKind": "pdf",
             "readDetails": {
@@ -276,12 +289,11 @@ class TestRedact:
                 "properties": {"propertyExampleB": "value"},
             },
         }
-        inst = RedactionManager()
-        inst.job_id = "inst"
-        inst.stage = "ANALYSE"
-        inst.folder_for_job = "instfolder"
-        inst.storage_name = "pinsstredactiondevuks"
-        inst.redact(payload)
+
+    def test_all_calls(self):
+        inst = self._create_manager()
+        inst.redact(self._create_payload())
+
         # Read and write properties should be converted to snake case
         RedactionManager.convert_kwargs_for_io.assert_has_calls(
             [
@@ -289,6 +301,7 @@ class TestRedact:
                 call({"propertyExampleB": "value"}),
             ]
         )
+
         # Read and write storage IO should be fetched, based on the specified storage kind in the payload
         IOFactory.get.assert_has_calls(
             [
@@ -296,16 +309,20 @@ class TestRedact:
                 call("writeStorageKind"),
             ]
         )
+
         # Data should be read once, using read config in the payload
         MockIO.read.assert_called_once_with(property_example_a="value")
+
         # File processor should be loaded based on the payload
         FileProcessorFactory.get.assert_called_once_with("pdf")
+
         # Config should be loaded based on the payload
         ConfigProcessor.load_config.assert_called_once_with("myconfig")
         ConfigProcessor.validate_and_filter_config.assert_called_once_with(
             ConfigProcessor.load_config.return_value,
             FileProcessorFactory.get.return_value,
         )
+
         # Sample document data should be written twice - one for the raw file,
         # and once for the proposed redactions
         AzureBlobIO.write.assert_has_calls(
@@ -322,11 +339,13 @@ class TestRedact:
                 ),
             ]
         )
+
         # Redact should be called once on the read file, using the loaded config
         MockRedactor.redact.assert_called_once_with(
             MockIO.read.return_value,
             ConfigProcessor.validate_and_filter_config.return_value,
         )
+
         # Final redactions should be retrieved from the file processor, and saved to blob storage with the correct metadata
         MockRedactor.get_proposed_redactions.assert_called_once_with(
             MockRedactor.redact.return_value
@@ -343,11 +362,93 @@ class TestRedact:
             calls[0].kwargs["blob_path"]
             == f"{inst.folder_for_job}/proposed_redactions.json"
         )
+
         # Data should be written back to the specified write address in the payload
         MockIO.write.assert_called_once_with(
             MockRedactor.redact.return_value,
             property_example_b="value",
         )
+
+    def test_saves_rationale(self):
+        """
+        - Given the file processor has a rationale for the proposed redactions
+        - When I call redact
+        - Then the rationale is saved to the job's folder, alongside the job details
+        """
+        rationale = [{"rule_name": "names", "redactions": []}]
+        inst = self._create_manager()
+
+        with patch.object(
+            MockRedactor, "get_redaction_rationale", return_value=rationale
+        ):
+            inst.redact(self._create_payload())
+
+        calls = RedactionManager.save_dict_to_blob_json.call_args_list
+        assert [c.kwargs["blob_path"] for c in calls] == [
+            "instfolder/proposed_redactions.json",
+            "instfolder/rationale.json",
+        ]
+        assert calls[1].args[0] == {
+            "job_id": "inst",
+            "date": datetime(2024, 1, 1, tzinfo=UTC).date().isoformat(),
+            "file_name": "",
+            "config_name": "myconfig",
+            "rules": rationale,
+        }
+        assert inst.runtime_errors == []
+
+    def test_redact__no_rationale_is_not_saved(self):
+        inst = self._create_manager()
+
+        with patch.object(
+            MockRedactor, "get_redaction_rationale", return_value=None
+        ) as mock_get_rationale:
+            inst.redact(self._create_payload())
+
+        mock_get_rationale.assert_called_once()
+        blob_paths = [
+            c.kwargs["blob_path"]
+            for c in RedactionManager.save_dict_to_blob_json.call_args_list
+        ]
+        assert blob_paths == ["instfolder/proposed_redactions.json"]
+
+    def test_skip_redaction_has_no_rationale(self):
+        inst = self._create_manager()
+
+        with patch.object(
+            MockRedactor, "get_redaction_rationale"
+        ) as mock_get_rationale:
+            inst.redact(self._create_payload(skip_redaction=True))
+
+        mock_get_rationale.assert_not_called()
+        RedactionManager.save_dict_to_blob_json.assert_not_called()
+
+    @pytest.mark.parametrize("failing_step", ["get", "save"])
+    def test_rationale_failure_is_recorded_but_not_fatal(self, failing_step):
+        """
+        - Given the rationale cannot be retrieved or saved
+        - When I call redact
+        - Then the redaction still completes and the error is recorded for the
+          exception log
+        """
+        inst = self._create_manager()
+        error = RuntimeError("rationale failure")
+        rationale = [{"rule_name": "names"}]
+
+        with patch.object(
+            MockRedactor,
+            "get_redaction_rationale",
+            side_effect=error if failing_step == "get" else None,
+            return_value=rationale,
+        ):
+            if failing_step == "save":
+                RedactionManager.save_dict_to_blob_json.side_effect = [None, error]
+            inst.redact(self._create_payload())
+
+        # The proposed redactions and the proposed file are still written
+        MockIO.write.assert_called_once()
+        assert len(inst.runtime_errors) == 1
+        assert "rationale failure" in inst.runtime_errors[0]
 
 
 class TestCompareRedactions:

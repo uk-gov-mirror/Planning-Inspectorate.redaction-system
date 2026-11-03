@@ -289,6 +289,30 @@ class RedactionManager:
             blob_path=f"{self.folder_for_job}/{file_name}.{self.file_extension}",
         )
 
+    def _save_redaction_rationale(self, params: dict[str, Any]):
+        """
+        Save the LLM's rationale for the proposed redactions, if there is any. This is
+        diagnostic, so a failure is recorded without failing the redaction
+        """
+        try:
+            rationale = self.file_processor_inst.get_redaction_rationale()
+            if not rationale:
+                return
+            self.save_dict_to_blob_json(
+                {
+                    "job_id": self.job_id,
+                    "date": datetime.now(tz=UTC).date().isoformat(),
+                    "file_name": self.read_storage_properties.get("blob_path", ""),
+                    "config_name": params.get("configName", "default"),
+                    "rules": rationale,
+                },
+                self.redaction_storage_io_inst,
+                blob_path=f"{self.folder_for_job}/rationale.json",
+            )
+            LoggingUtil().log_info("Saved the rationale for the proposed redactions")
+        except Exception as e:  # noqa: BLE001
+            self.log_exception(e)
+
     def redact(self, params: dict[str, Any]) -> dict[str, Any]:
         """
         Perform a redaction using the supplied parameters
@@ -334,6 +358,7 @@ class RedactionManager:
             LoggingUtil().log_info(
                 "Saving a copy of the proposed redactions in JSON format for analytics"
             )
+            self._save_redaction_rationale(params)
 
         # Store a copy of the proposed redactions in redaction storage
         LoggingUtil().log_info("Saving a copy of the proposed redactions")

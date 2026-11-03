@@ -16,6 +16,7 @@ from dotenv import load_dotenv
 
 from src.api.redaction_manager import RedactionManager
 from src.monitoring import LoggingUtil
+from src.redaction.config_processor import ConfigProcessor
 from tests.utils import (
     PDF_DIR,
     PROPOSED_PDF,
@@ -154,6 +155,7 @@ class TestRedactionManager(TestCase):
             "try_redact_skip_redaction",
             "try_redact_failure",
             "try_redact_with_analytics",
+            "try_redact_with_rationale",
             "try_apply",
             "try_apply_nothing_to_redact",
         ]
@@ -344,6 +346,76 @@ class TestRedactionManager(TestCase):
         }, (
             f"{json_blob} should contain at least the keys 'jobID', 'date', 'fileName', and 'proposedRedactions'"
         )
+
+    def test_saves_rationale_when_included(self):
+        """
+        - Given I have a pdf in a storage account and redaction rules that include a rationale
+        - When I call RedactionManager.redact
+        - Then the rationale should be saved alongside the proposed redactions, and the
+          decisions should not be in the metrics that are saved or returned
+        """
+        load_config = ConfigProcessor.load_config
+
+        def load_config_with_rationale(config_name):
+            config = load_config(config_name)
+            for redactor in config["redactors"]:
+                if redactor["redactor_type"] == "LLMTextRedaction":
+                    for rule in redactor["redaction_rules"]:
+                        rule["include_rationale"] = True
+                        rule["max_tokens"] = 8000
+            return config
+
+        guid = f"{RUN_ID}-trmtrr"
+        with mock.patch.object(
+            ConfigProcessor, "load_config", side_effect=load_config_with_rationale
+        ):
+            _, response = self._invoke(
+                guid, "try_redact_with_rationale", source_file=RR_PDF
+            )
+
+        self.validate_process_status(response)
+        assert "redaction_decisions" not in json.dumps(response, default=str)
+
+        rationale_blob = f"{guid}-{MOCK_START_TIME}/rationale.json"
+        blob_client = self.REDACTION_CONTAINER_CLIENT.get_blob_client(rationale_blob)
+        assert blob_client.exists(), (
+            f"Expected {rationale_blob} to be in the redactiondata container, but was missing"
+        )
+        rationale = json.loads(blob_client.download_blob().read().decode("utf-8"))
+        assert rationale.keys() >= {
+            "job_id",
+            "date",
+            "file_name",
+            "config_name",
+            "rules",
+        }
+        assert rationale["job_id"] == f"{guid}-{MOCK_START_TIME}"
+        assert rationale["config_name"] == "default"
+        assert rationale["rules"]
+        for rule in rationale["rules"]:
+            assert rule.keys() >= {"rule_name", "clauses", "chunks", "redactions"}
+            for redaction in rule["redactions"]:
+                assert redaction["pages"]
+                assert all(page >= 1 for page in redaction["pages"])
+
+        metric_blob = f"{guid}-{MOCK_START_TIME}/ANALYSE_metrics.json"
+        metrics = (
+            self.REDACTION_CONTAINER_CLIENT.get_blob_client(metric_blob)
+            .download_blob()
+            .read()
+            .decode("utf-8")
+        )
+        assert "redaction_decisions" not in metrics
+
+        proposed_blob = f"{guid}-{MOCK_START_TIME}/proposed_redactions.json"
+        proposed = json.loads(
+            self.REDACTION_CONTAINER_CLIENT.get_blob_client(proposed_blob)
+            .download_blob()
+            .read()
+            .decode("utf-8")
+        )
+        pages = [p["pageNumber"] for p in proposed["proposedRedactions"]]
+        assert pages and min(pages) == 1
 
     def test_error_handling(self):
         """

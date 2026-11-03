@@ -146,6 +146,14 @@ class FileProcessor(ABC):
         :return list[dict[str, Any]]: The final redactions
         """
 
+    def get_redaction_rationale(self) -> list[dict[str, Any]] | None:
+        """
+        Return the reasons behind the proposed redactions, if the processor recorded any
+
+        :return list[dict[str, Any]] | None: The rationale, or None if there is none
+        """
+        return None
+
 
 class PDFProcessor(FileProcessor):
     """
