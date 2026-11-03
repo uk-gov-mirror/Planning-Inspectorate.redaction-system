@@ -1,3 +1,4 @@
+from io import BytesIO
 from math import isclose
 from string import punctuation
 
@@ -780,3 +781,216 @@ class TestApply:
             "Expected the metadata in the pdf to have been scrubbed, but it was not. "
             f"Expected: {expected_metadata}, Actual: {redacted_document.metadata}"
         )
+
+
+RATIONALE_PAGES = (
+    (
+        "Joan Brown of 12 Mill Lane objects to the proposed extension at the rear of "
+        "her neighbour's house. She says that the building would block light to her "
+        "garden and that she was not consulted by the applicant before the plans were "
+        "submitted to the council."
+    ),
+    (
+        "Mary Jones, who lives next door, supports the proposal. She believes that the "
+        "extension will improve the street and says that Joan Brown has misunderstood "
+        "the plans. Councillor Raj Patel attended the site visit and spoke in support."
+    ),
+    (
+        "In conclusion, Joan Brown asks the planning committee to refuse the "
+        "application. Her letter was written on behalf of the residents of Mill Lane, "
+        "and she would be happy to meet an officer at the site to discuss the concerns "
+        "raised."
+    ),
+)
+
+
+def make_pdf_with_pages(*texts: str) -> BytesIO:
+    doc = pymupdf.open()
+    for text in texts:
+        doc.new_page().insert_textbox(pymupdf.Rect(72, 72, 540, 770), text)
+    file_bytes = BytesIO()
+    doc.save(file_bytes)
+    file_bytes.seek(0)
+    return file_bytes
+
+
+def create_rationale_config(**kwargs) -> LLMTextRedactionConfig:
+    return LLMTextRedactionConfig(
+        name="config name",
+        redactor_type="LLMTextRedaction",
+        model="gpt-5.6-luna",
+        role="You redact personal data from planning representations.",
+        task="Find the personal data of members of the public in the text.",
+        redaction_terms=["Names of members of the public", "Home addresses"],
+        do_not_redact=["Names of elected councillors"],
+        include_rationale=True,
+        max_tokens=3000,
+        **kwargs,
+    )
+
+
+def normalise_whitespace(text: str) -> str:
+    return " ".join(text.split())
+
+
+class TestGetRedactionRationale:
+    def redact_pages(self, **config_kwargs) -> tuple[PDFProcessor, dict]:
+        config = create_rationale_config(**config_kwargs)
+        processor = PDFProcessor()
+        processor.redact(
+            make_pdf_with_pages(*RATIONALE_PAGES), {"redaction_rules": [config]}
+        )
+        [rationale] = processor.get_redaction_rationale()
+        return processor, rationale
+
+    def test_traces_decisions_to_chunks_and_pages(self):
+        """
+        - Given a three page PDF analysed by an LLM rule in several small chunks, with
+          include_rationale enabled
+        - When I redact the PDF and get the redaction rationale
+        - Then the rule's chunks cover the pages, and every redaction's pages are
+          exactly the pages whose text contains it
+        """
+        config = create_rationale_config(chunk_size=60, chunk_overlap=10)
+        processor = PDFProcessor()
+        processor.redact(
+            make_pdf_with_pages(*RATIONALE_PAGES), {"redaction_rules": [config]}
+        )
+        [rationale] = processor.get_redaction_rationale()
+
+        assert rationale["rule_name"] == "config name"
+        assert rationale["model"] == "gpt-5.6-luna"
+        assert (rationale["chunk_size"], rationale["chunk_overlap"]) == (60, 10)
+        assert rationale["clauses"] == config.get_clause_legend()
+
+        chunks = rationale["chunks"]
+        assert len(chunks) > 1
+        assert [c["chunk_index"] for c in chunks] == list(range(len(chunks)))
+        assert all(c["status"] == "ok" for c in chunks)
+        assert all(c["pages"] for c in chunks)
+        assert {page for c in chunks for page in c["pages"]} == {1, 2, 3}
+
+        assert rationale["redactions"]
+        page_text = [normalise_whitespace(text) for text in RATIONALE_PAGES]
+        for redaction in rationale["redactions"]:
+            assert redaction["pages"]
+            assert isinstance(redaction["applied"], bool)
+            expected_pages = [
+                number
+                for number, text in enumerate(page_text, start=1)
+                if normalise_whitespace(redaction["text"]) in text
+            ]
+            if expected_pages:
+                assert redaction["pages"] == expected_pages, redaction["text"]
+            for occurrence in redaction["occurrences"]:
+                assert 0 <= occurrence["chunk_index"] < len(chunks)
+                assert occurrence["pages"]
+                assert set(occurrence["pages"]) <= set(redaction["pages"])
+
+    def test_redaction_pages_match_the_pages_highlighted_in_the_pdf(self):
+        """
+        - Given pages where words such as 'her' and 'other' appear inside longer words
+          like 'another' and 'there' as well as on their own
+        - When I redact the PDF and get the redaction rationale
+        - Then each applied redaction is reported on exactly the pages it is
+          highlighted on in the PDF, and each occurrence on one of those pages
+        """
+        pages = (
+            (
+                "Joan Brown told another neighbour, who lives there, about the plans "
+                "for the extension at the rear of the house on Mill Lane."
+            ),
+            (
+                "Mary Jones said her garden would lose light, and that the other "
+                "houses were not affected. She asked Joan Brown to write to the council."
+            ),
+        )
+        config = create_rationale_config(chunk_size=40, chunk_overlap=5)
+        processor = PDFProcessor()
+        redacted = processor.redact(
+            make_pdf_with_pages(*pages), {"redaction_rules": [config]}
+        )
+        [rationale] = processor.get_redaction_rationale()
+        highlighted = {}
+        for page in PDFProcessor.get_proposed_redactions(redacted):
+            for annotation in page["annotations"]:
+                highlighted.setdefault(annotation["proposedRedaction"], set()).add(
+                    page["pageNumber"]
+                )
+
+        applied = [r for r in rationale["redactions"] if r["applied"]]
+        assert applied
+        for redaction in applied:
+            term_pages = highlighted[" ".join(redaction["text"].split("\n"))]
+            assert set(redaction["pages"]) == term_pages, redaction["text"]
+            for occurrence in redaction["occurrences"]:
+                assert occurrence["pages"]
+                assert set(occurrence["pages"]) <= term_pages
+
+    def test_redactions_are_sorted_by_first_page(self):
+        _, rationale = self.redact_pages(chunk_size=60, chunk_overlap=10)
+
+        first_pages = [r["pages"][0] for r in rationale["redactions"]]
+        assert first_pages == sorted(first_pages)
+
+    def test_name_on_several_pages_has_an_occurrence_per_page(self):
+        """
+        - Given a name that appears on all three pages
+        - When each page is analysed as its own chunk
+        - Then the name is one redaction with the pages it appears on, and each
+          occurrence is traced to a different chunk
+        """
+        _, rationale = self.redact_pages(chunk_size=80, chunk_overlap=0)
+
+        [redaction] = [
+            r
+            for r in rationale["redactions"]
+            if normalise_whitespace(r["text"]).lower() == "joan brown"
+        ]
+        assert redaction["pages"] == [1, 2, 3]
+        assert redaction["chunk_count"] > 1
+        assert len({o["chunk_id"] for o in redaction["occurrences"]}) > 1
+
+    def test_decisions_are_kept_out_of_run_metrics(self):
+        """
+        - Given include_rationale is enabled and the LLM has returned decisions
+        - When I redact the PDF
+        - Then the decisions are only in the rationale, not in the run metrics that
+          are returned to the caller
+        """
+        processor, rationale = self.redact_pages(chunk_size=60, chunk_overlap=10)
+
+        assert rationale["redactions"]
+        summary = processor.get_run_metrics()["text_redaction_summary"]["config name"]
+        assert set(summary) == {"redaction_strings", "n_proposed", "n_applied"}
+
+    def test_returns_none_without_include_rationale(self):
+        """
+        - Given an LLM rule with include_rationale left off
+        - When I redact the PDF
+        - Then there is no rationale
+        """
+        config = create_rationale_config(chunk_size=60, chunk_overlap=10).model_copy(
+            update={"include_rationale": False}
+        )
+        processor = PDFProcessor()
+        processor.redact(
+            make_pdf_with_pages(*RATIONALE_PAGES), {"redaction_rules": [config]}
+        )
+
+        assert processor.get_run_metrics()["text_redaction_summary"]["config name"]
+        assert processor.get_redaction_rationale() is None
+
+    def test_returns_none_for_image_rule(self):
+        """
+        - Given an image text rule with include_rationale enabled
+        - When I redact a PDF containing images
+        - Then there is no rationale, since image rules do not return decisions
+        """
+        config = create_config(is_image=True)["redaction_rules"][0].model_copy(
+            update={"include_rationale": True, "max_tokens": 3000}
+        )
+        processor = PDFProcessor()
+        processor.redact(open_pdf(SOURCE_IMAGE_PDF), {"redaction_rules": [config]})
+
+        assert processor.get_redaction_rationale() is None
