@@ -58,4 +58,6 @@ class TestImageTextRedactorBase:
         cleaned_results = dataclasses.asdict(results)
         cleaned_results.pop("run_metrics")
         cleaned_results.pop("metadata", None)
+        cleaned_results.pop("redaction_decisions", None)
+        cleaned_results.pop("excluded_decisions", None)
         return cleaned_results
