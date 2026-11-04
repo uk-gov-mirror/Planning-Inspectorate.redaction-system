@@ -72,6 +72,9 @@ class LLMTextAnalyserConfig(BaseModel):
     """Maximum number of tokens per completion, including reasoning tokens"""
     reasoning_effort: Literal["minimal", "low", "medium", "high"] | None = None
     """Reasoning effort for reasoning models. None uses the model's default"""
+    include_rationale: bool = False
+    """Ask the LLM for a reason, clause IDs and confidence for each redaction. This
+    uses more completion tokens, so consider raising max_tokens"""
     request_rate_limit: int | None = None
     """Maximum number of requests per minute. Defaults to 20% of model max RPM."""
     token_rate_limit: int | None = None
