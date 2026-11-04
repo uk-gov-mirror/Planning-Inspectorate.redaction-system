@@ -18,6 +18,7 @@ from ..analysis import AzureImageAnalyser
 from ..monitoring import LoggingUtil, MetricUtil, TimerUtil, log_to_appins
 from ..types import (
     ImageRedactionResult,
+    LLMTextRedactionResult,
     RedactionResult,
     TextRedactionResult,
 )
@@ -681,11 +682,18 @@ class PDFProcessor(FileProcessor):
 
         if issubclass(redaction_result.__class__, TextRedactionResult):
             self.run_metrics["text_analysis_total_time"] += redaction_time
-            self._text_redaction_summary[redaction_result.rule_name] = {
+            summary = {
                 "redaction_strings": redaction_strings,
                 "n_proposed": n_strings,
                 "n_applied": n_strings,
             }
+            if isinstance(redaction_result, LLMTextRedactionResult) and (
+                redaction_result.redaction_decisions
+                or redaction_result.excluded_decisions
+            ):
+                summary["redaction_decisions"] = redaction_result.redaction_decisions
+                summary["excluded_decisions"] = redaction_result.excluded_decisions
+            self._text_redaction_summary[redaction_result.rule_name] = summary
         elif issubclass(redaction_result.__class__, ImageRedactionResult):
             self.run_metrics["image_analysis_total_time"] += redaction_time
 
@@ -703,6 +711,7 @@ class PDFProcessor(FileProcessor):
     def _result_to_loggable_dict(redaction_result: RedactionResult) -> dict[str, Any]:
         """
         Convert a redaction result to a dictionary, without copying the source images
+        or including personal data from redaction decisions.
         """
         if not isinstance(redaction_result, ImageRedactionResult):
             return dataclasses.asdict(redaction_result)

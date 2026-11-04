@@ -20,6 +20,7 @@ from src.redaction.utils.text import get_normalised_words, is_english_text
 from src.types import (
     ImageLLMTextRedactionResult,
     ImageRedactionResult,
+    LLMTextRedactionResult,
     TextRedactionResult,
 )
 from tests.utils import (
@@ -571,6 +572,23 @@ class TestApplyRule:
         assert any("John Smith" in message for message in audit_messages)
         assert not any("John Smith" in message for message in info_messages)
         assert processor.redaction_results == [result]
+
+    def test_no_decisions_leaves_summary_unchanged(self):
+        result = LLMTextRedactionResult(
+            rule_name="names", run_metrics={}, redaction_strings=("Joan Brown",)
+        )
+        processor = PDFProcessor()
+        processor.run_metrics = {"text_analysis_total_time": 0.0}
+        processor._text_redaction_summary = {}
+        processor.redaction_results = []
+
+        processor._apply_rule(Mock(redact=Mock(return_value=result)))
+
+        assert processor._text_redaction_summary["names"] == {
+            "redaction_strings": ("Joan Brown",),
+            "n_proposed": 1,
+            "n_applied": 1,
+        }
 
 
 class TestApplyRedactionRules(TestExamineApplyRedactionsBase):
