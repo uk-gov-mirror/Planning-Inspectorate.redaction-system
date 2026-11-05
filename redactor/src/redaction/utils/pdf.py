@@ -647,6 +647,42 @@ class PDFUtil:
         )
 
     @classmethod
+    def _fused_word_spans(
+        cls,
+        normalised_words_to_redact: list[str],
+        words_to_check: NDArray[np.str_],
+        start_index: int,
+        end_index: int | None = None,
+    ) -> tuple[tuple[int, int] | None, tuple[int, int] | None]:
+        """
+        Find the part of the first and last words matched that is the term, where they
+        were fused to a neighbouring word by a missing space (e.g. "somethingMonica").
+
+        :param int start_index: The index of the first word matched in the line
+        :param int end_index: The index of the last word matched in the line, if the
+            whole term was matched
+        :return tuple: The span in the first word and the span in the last word, each
+            None if that word was matched in full
+        """
+        first_word = normalised_words_to_redact[0]
+        first_token = str(words_to_check[start_index])
+        start_span = None
+        if not cls._token_matches_word(
+            first_token, first_word
+        ) and cls._token_has_boundary_suffix(first_token, first_word):
+            start_span = (len(first_token) - len(first_word), len(first_token))
+
+        end_span = None
+        if end_index is not None:
+            last_word = normalised_words_to_redact[-1]
+            last_token = str(words_to_check[end_index])
+            if not cls._token_matches_word(
+                last_token, last_word
+            ) and cls._token_has_boundary_prefix(last_token, last_word):
+                end_span = (0, len(last_word))
+        return start_span, end_span
+
+    @classmethod
     def _construct_partial_word_rect(
         cls,
         page: pymupdf.Page | None,
@@ -827,6 +863,8 @@ class PDFUtil:
         first_line: PDFLineMetadata,
         page_number: int,
         start_index: int,
+        page: pymupdf.Page | None = None,
+        start_span: tuple[int, int] | None = None,
     ) -> list[tuple[int, pymupdf.Rect, str]]:
         """
         Construct the provisional redaction instance for a partial redaction across line breaks.
@@ -836,6 +874,9 @@ class PDFUtil:
         :param PDFLineMetadata first_line: The line metadata for the first part of the redaction instance
         :param int page_number: The page number for the first part of the redaction instance
         :param int start_index: The start index of the redaction instance on the first line
+        :param pymupdf.Page page: The page of the first part, used to narrow it to
+            `start_span` if the first word is fused to the word before it
+        :param tuple[int, int] start_span: The part of the first word that is the term
 
         :return list[tuple[int, pymupdf.Rect, str]]: A list containing the provisional redaction instances
             containing the page number, bounding box, and redaction text for both the first and second part of
@@ -845,10 +886,12 @@ class PDFUtil:
             return [  # First part of redaction instance
                 (
                     page_number,
-                    cls._construct_pdf_rect(
+                    cls._construct_partial_word_rect(
+                        page,
                         first_line,
                         start_index,
                         len(first_line.words) - 1,
+                        start_span,
                     ),
                     term_to_redact,
                 )
@@ -897,7 +940,8 @@ class PDFUtil:
         :param PDFPageMetadata next_page_metadata: The metadata of the next page
         to examine, in case of a line break on the next page
         :param pymupdf.Page page: The page where the redaction candidate is found. If
-        given, a term that is the name part of an email address is narrowed to
+        given, a term that only matches part of a word (the name part of an email
+        address, or a word fused to its neighbour by a missing space) is narrowed to
         that part using the page's character coordinates. Otherwise the whole word
         is used.
 
@@ -969,8 +1013,14 @@ class PDFUtil:
                         continue
                     # Exact match found - apply highlight
                     elif end - start == len(words_to_redact) - 1:
-                        # Calculate the rect for the term to redact
-                        rect = cls._construct_pdf_rect(line_to_check, start, end)
+                        # Calculate the rect for the term to redact. A first or last word
+                        # fused to a neighbouring word is narrowed to the term
+                        start_span, end_span = cls._fused_word_spans(
+                            words_to_redact, words_to_check, start, end
+                        )
+                        rect = cls._construct_partial_word_rect(
+                            page, line_to_check, start, end, start_span, end_span
+                        )
                         redaction_instances.append((page_number, rect, term_to_redact))
                     # Partial match found - check for partial redaction across line breaks
                     elif end == len(words_to_check) - 1:
@@ -982,6 +1032,9 @@ class PDFUtil:
                             page_metadata,
                             next_page_metadata,
                         )
+                        start_span, _ = cls._fused_word_spans(
+                            words_to_redact, words_to_check, start
+                        )
                         redaction_instances.extend(
                             cls._construct_line_broken_redaction_instance(
                                 results,
@@ -989,6 +1042,8 @@ class PDFUtil:
                                 line_to_check,
                                 page_number,
                                 start,
+                                page,
+                                start_span,
                             )
                         )
 

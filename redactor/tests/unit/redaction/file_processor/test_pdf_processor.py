@@ -515,15 +515,21 @@ class TestApplyProvisionalTextRedactions(TestExamineApplyRedactionsBase):
                 "Ada.Merrin",
                 "Ada.Merrin",
             ),
+            (
+                "Thanks somethingMonica Cowan for that",
+                "Monica Cowan",
+                "Monica Cowan",
+            ),
         ],
     )
-    def test_highlights_only_the_name_part_of_an_email(
+    def test_highlights_only_the_part_of_a_word_that_matches(
         self, page_text, term, highlighted_text
     ):
         """
-        - Given a term that is the name part of an email address
+        - Given a term that is the name part of an email address, or is fused to the
+          word before it by a missing space
         - When I apply the provisional redactions
-        - Then only the name part of the address is highlighted
+        - Then only that part of the word is highlighted
         """
         file_bytes = _make_pdf_with_text(page_text)
         pdf_processor = PDFProcessor()

@@ -946,6 +946,32 @@ class TestPartialWordHighlights:
             _x_range(page.search_for("ada.merrin")[0]), abs=0.5
         )
 
+    def test_word_fused_to_the_previous_word(self):
+        page = _real_page("Thanks somethingMonica Cowan for that")
+
+        [(_, rect, _)] = self._examine(page, "Monica Cowan")
+
+        assert _x_range(rect) == pytest.approx(
+            _x_range(page.search_for("Monica Cowan")[0]), abs=0.5
+        )
+
+    def test_word_fused_to_the_next_word(self):
+        page = _real_page("Dear Christine Watts-Hughgeneva now")
+
+        [(_, rect, _)] = self._examine(page, "Christine Watts-Hugh")
+
+        expected = page.search_for("Christine Watts-Hugh")[0]
+        assert _x_range(rect) == pytest.approx(_x_range(expected), abs=0.5)
+
+    def test_whole_words_are_not_narrowed(self):
+        page = _real_page("Dear Bob's friend Monica")
+
+        [(_, rect, _)] = self._examine(page, "Bob")
+
+        assert _x_range(rect) == pytest.approx(
+            _x_range(page.search_for("Bob's")[0]), abs=0.5
+        )
+
     def test_characters_are_only_extracted_for_partial_word_matches(self):
         page = _real_page("Dear Bob, email ada.merrin@post.invalid")
 
