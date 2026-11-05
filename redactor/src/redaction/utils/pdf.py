@@ -8,7 +8,13 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from ...analysis.images import ImageAnalyser
 from ...types import PydanticImage
-from .text import get_normalised_words, normalise_text, normalised_character_origins
+from .text import (
+    email_name_part_span,
+    get_normalised_words,
+    is_email_name_part,
+    normalise_text,
+    normalised_character_origins,
+)
 
 # Minimum length of a redaction term's boundary word to allow it to match when
 # fused to an adjacent word by a missing space (e.g. "somethingMonica"). This
@@ -455,6 +461,7 @@ class PDFUtil:
         word: str,
         words_to_check: NDArray[np.str_],
         allow_suffix: bool = False,
+        allow_email_name_part: bool = False,
     ) -> list[int]:
         """
         Find the indices of words in the line that match the word to redact.
@@ -464,6 +471,10 @@ class PDFUtil:
         :param bool allow_suffix: Also match tokens that end with the word (i.e. a
             preceding word was fused to it by a missing space). Only enabled for the
             first word of multi-word terms, and guarded by a minimum word length.
+        :param bool allow_email_name_part: Also match email addresses whose name part
+            (before the "@") contains the word as a whole component, so the name part
+            of an address can be redacted without the LLM returning the whole address.
+            Only enabled for single-word terms.
 
         :return list[int]: The indices of words in the line that match the word to redact
         """
@@ -477,6 +488,13 @@ class PDFUtil:
                 words_to_check != word,
             )
             matches = np.logical_or(matches, suffix_matches)
+        if allow_email_name_part:
+            email_matches = np.fromiter(
+                (is_email_name_part(str(token), word) for token in words_to_check),
+                dtype=bool,
+                count=len(words_to_check),
+            )
+            matches = np.logical_or(matches, email_matches)
         return np.where(matches)[0].tolist()
 
     @classmethod
@@ -498,7 +516,10 @@ class PDFUtil:
         # Find matches for the first word. For multi-word terms, allow the first word
         # to match a token it has been fused to by a missing space (e.g. "somethingMonica").
         matching_indices = cls._match_word_to_redact_in_line(
-            normalised_words_to_redact[0], words_to_check, allow_suffix=is_multi_word
+            normalised_words_to_redact[0],
+            words_to_check,
+            allow_suffix=is_multi_word,
+            allow_email_name_part=not is_multi_word,
         )
 
         matches = []
@@ -864,6 +885,7 @@ class PDFUtil:
         term_to_redact: str,
         page_metadata: PDFPageMetadata,
         next_page_metadata: PDFPageMetadata = None,
+        page: pymupdf.Page | None = None,
     ) -> list[tuple[int, pymupdf.Rect, str]]:
         """
         Check whether the provisional redaction candidate is valid, i.e., a full
@@ -874,6 +896,10 @@ class PDFUtil:
         redaction candidate is found
         :param PDFPageMetadata next_page_metadata: The metadata of the next page
         to examine, in case of a line break on the next page
+        :param pymupdf.Page page: The page where the redaction candidate is found. If
+        given, a term that is the name part of an email address is narrowed to
+        that part using the page's character coordinates. Otherwise the whole word
+        is used.
 
         :return list[tuple[int, pymupdf.Rect, str]]: The list of valid redaction
             candidates to apply. Each tuple contains the page number, the bounding box
@@ -908,6 +934,13 @@ class PDFUtil:
                         and term_found[:-2] == normalised_term_to_redact
                     ):
                         rect = cls._construct_pdf_rect(line_to_check, start, end)
+                        redaction_instances.append((page_number, rect, term_to_redact))
+                    elif email_span := email_name_part_span(
+                        term_found, normalised_term_to_redact
+                    ):
+                        rect = cls._construct_partial_word_rect(
+                            page, line_to_check, start, end, email_span, email_span
+                        )
                         redaction_instances.append((page_number, rect, term_to_redact))
                     # Check for partial redaction if term contains a hyphen
                     elif "-" in term_to_redact and end == len(words_to_check) - 1:

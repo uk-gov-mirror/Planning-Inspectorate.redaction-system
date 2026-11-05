@@ -384,6 +384,7 @@ class PDFProcessor(FileProcessor):
                 text_to_redact,
                 page_metadata,
                 next_page_metadata,
+                page,
             )
             redaction_instances.extend(page_redaction_instances)
             LoggingUtil().log_info(
@@ -422,6 +423,7 @@ class PDFProcessor(FileProcessor):
         text_to_redact: list[str],
         page_metadata: PDFPageMetadata,
         next_page_metadata: PDFPageMetadata = None,
+        page: pymupdf.Page | None = None,
     ) -> list[tuple[int, pymupdf.Rect, str]]:
         """
         Check whether the provisional redaction candidates on the given page are
@@ -431,6 +433,8 @@ class PDFProcessor(FileProcessor):
         :param PDFPageMetadata page_metadata: The metadata of the page to examine
         :param PDFPageMetadata next_page_metadata: The metadata of the next page to
         examine, in case of a line break on the next page
+        :param pymupdf.Page page: The page to examine, used to redact only the matching
+        part of a word that a term is fused to or part of (e.g. in an email address)
         :return list[tuple[int, pymupdf.Rect, str]]: The list of valid
             redaction instances to apply on the page. Each tuple contains the page number
             (which may be the following page for partial redactions across line breaks),
@@ -455,7 +459,7 @@ class PDFProcessor(FileProcessor):
                 f"    Examining redaction candidate for term '{term_to_redact}'"
             )
             instances_to_apply = PDFUtil.examine_provisional_text_redaction(
-                term_to_redact, page_metadata, next_page_metadata
+                term_to_redact, page_metadata, next_page_metadata, page=page
             )
             redaction_instances.extend(instances_to_apply)
             self.terms_found.update(

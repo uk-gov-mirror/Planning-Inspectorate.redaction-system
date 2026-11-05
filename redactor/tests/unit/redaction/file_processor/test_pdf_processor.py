@@ -507,6 +507,40 @@ class TestApplyProvisionalTextRedactions(TestExamineApplyRedactionsBase):
         mock_examine_provisional_redactions_on_page.assert_not_called()
         mock_add_provisional_redaction.assert_not_called()
 
+    @pytest.mark.parametrize(
+        ("page_text", "term", "highlighted_text"),
+        [
+            (
+                "Contact Ada.Merrin@post.invalid today",
+                "Ada.Merrin",
+                "Ada.Merrin",
+            ),
+        ],
+    )
+    def test_highlights_only_the_name_part_of_an_email(
+        self, page_text, term, highlighted_text
+    ):
+        """
+        - Given a term that is the name part of an email address
+        - When I apply the provisional redactions
+        - Then only the name part of the address is highlighted
+        """
+        file_bytes = _make_pdf_with_text(page_text)
+        pdf_processor = PDFProcessor()
+        pdf_processor.terms_found = {term: 0}
+
+        result = pdf_processor._apply_provisional_text_redactions(file_bytes, [term])
+
+        page = pymupdf.open(stream=result)[0]
+        [annotation] = list(page.annots())
+        vertices = annotation.vertices
+        highlighted = pymupdf.Rect(*vertices[0], *vertices[-1])
+        expected = page.search_for(highlighted_text)[0]
+        assert (highlighted.x0, highlighted.x1) == pytest.approx(
+            (expected.x0, expected.x1), abs=0.5
+        )
+        assert annotation.info["content"] == term
+
 
 class TestApplyRule:
     @staticmethod
