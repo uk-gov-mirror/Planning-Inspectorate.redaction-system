@@ -8,7 +8,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from ...analysis.images import ImageAnalyser
 from ...types import PydanticImage
-from .text import get_normalised_words, normalise_text
+from .text import get_normalised_words, normalise_text, normalised_character_origins
 
 # Minimum length of a redaction term's boundary word to allow it to match when
 # fused to an adjacent word by a missing space (e.g. "somethingMonica"). This
@@ -556,6 +556,101 @@ class PDFUtil:
             line.x1[end_index],
             line.y1,
         )
+
+    @staticmethod
+    def get_character_edges(
+        page: pymupdf.Page,
+        word_rect: pymupdf.Rect,
+        normalised_word: str,
+        span: tuple[int, int],
+    ) -> tuple[float, float] | None:
+        """
+        Get where part of a word is on the page, from the page's character coordinates.
+        These are slow to extract, so are only used for terms that match part of a word
+        (e.g. the name part of an email address, or a word fused to the previous one by
+        a missing space), and not for the usual whole-word matches.
+
+        :param pymupdf.Page page: The page the word is on
+        :param pymupdf.Rect word_rect: The bounding box of the whole word
+        :param str normalised_word: The word as in `PDFLineMetadata.words`
+        :param tuple[int, int] span: The start and end index of the part of the
+            normalised word
+        :return tuple[float, float] | None: The x coordinates of the left edge of the
+            first character and the right edge of the last character of the part, or
+            None if the page's characters can't be matched to the word
+        """
+        characters = []
+        for block in page.get_text("rawdict", clip=word_rect)["blocks"]:
+            for line in block.get("lines", []):
+                for text_span in line["spans"]:
+                    for character in text_span["chars"]:
+                        x0, y0, x1, y1 = character["bbox"]
+                        # The clip includes neighbouring text that touches the word
+                        if word_rect.contains(
+                            pymupdf.Point((x0 + x1) / 2, (y0 + y1) / 2)
+                        ):
+                            characters.append(character)
+
+        text = "".join(character["c"] for character in characters)
+        if normalise_text(text) != normalised_word:
+            return None
+        origins = normalised_character_origins(text)
+        start, end = span
+        if origins is None or not 0 <= start < end <= len(origins):
+            return None
+
+        # A character's text may be more than one character, e.g. a ligature
+        owners = [i for i, character in enumerate(characters) for _ in character["c"]]
+        first = characters[owners[origins[start]]]
+        last = characters[owners[origins[end - 1]]]
+        left, right = first["bbox"][0], last["bbox"][2]
+        return (left, right) if left < right else None
+
+    @classmethod
+    def _get_word_part_edges(
+        cls,
+        page: pymupdf.Page | None,
+        line: PDFLineMetadata,
+        word_index: int,
+        span: tuple[int, int] | None,
+    ) -> tuple[float, float] | None:
+        """Get the edges of the part of a word in the line, or None if there is no
+        page or span, or the part can't be found, so the whole word should be used"""
+        if page is None or span is None:
+            return None
+        word_rect = pymupdf.Rect(
+            line.x0[word_index], line.y0, line.x1[word_index], line.y1
+        )
+        return cls.get_character_edges(
+            page, word_rect, str(line.words[word_index]), span
+        )
+
+    @classmethod
+    def _construct_partial_word_rect(
+        cls,
+        page: pymupdf.Page | None,
+        line: PDFLineMetadata,
+        start_index: int,
+        end_index: int,
+        start_span: tuple[int, int] | None = None,
+        end_span: tuple[int, int] | None = None,
+    ) -> pymupdf.Rect:
+        """
+        Construct the bounding box for the words in the line between the start and end
+        indices, narrowed to the part of the first word in `start_span` and the part of
+        the last word in `end_span`. A part that can't be found keeps its whole word.
+        """
+        rect = cls._construct_pdf_rect(line, start_index, end_index)
+        start_edges = cls._get_word_part_edges(page, line, start_index, start_span)
+        if (end_index, end_span) == (start_index, start_span):
+            end_edges = start_edges  # The same part of the same word
+        else:
+            end_edges = cls._get_word_part_edges(page, line, end_index, end_span)
+        if start_edges:
+            rect.x0 = start_edges[0]
+        if end_edges:
+            rect.x1 = end_edges[1]
+        return rect
 
     @staticmethod
     def add_provisional_redaction(
