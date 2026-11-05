@@ -1,3 +1,4 @@
+import re
 import threading
 from string import punctuation
 from unicodedata import category
@@ -85,3 +86,32 @@ def get_normalised_words(text: str) -> list[str]:
         for word in (text_normalised)
     ]
     return [word for word in words_normalised if word]  # Remove empty words
+
+
+def email_name_part_span(token: str, word: str) -> tuple[int, int] | None:
+    """
+    Find where a word is in the name part (before the "@") of an email address, as a
+    whole component, e.g. "ada.merrin" or "merrin" in "ada.merrin@post.invalid". The
+    domain never matches, and neither does a part of a component (e.g. "errin"). The
+    full address is an exact match, so is not matched here.
+
+    :param str token: A normalised word from the document
+    :param str word: A normalised word to redact
+    :return tuple[int, int] | None: The start and end index in the token, from the
+        first match to the last if the word is repeated, or None if there is no match
+    """
+    name_part, at_sign, _ = token.partition("@")
+    if not at_sign or not word or "@" in word:
+        return None
+    # (?<![^\W_]) ensures the word is not preceded by an alphanumeric character (or underscore)
+    # (?![^\W_]) ensures the word is not followed by an alphanumeric character (or underscore)
+    # This ensures we match whole components of the name part only, not substrings within components
+    matches = list(re.finditer(rf"(?<![^\W_]){re.escape(word)}(?![^\W_])", name_part))
+    if not matches:
+        return None
+    return matches[0].start(), matches[-1].end()
+
+
+def is_email_name_part(token: str, word: str) -> bool:
+    """Return True if the word is in the name part of the token, an email address"""
+    return email_name_part_span(token, word) is not None
