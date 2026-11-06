@@ -118,6 +118,40 @@ def _create_config(**kwargs) -> LLMTextRedactionConfig:
     )
 
 
+def test_llm_text_redaction_config__get_clause_legend():
+    """
+    - Given I have llm redaction config with every clause section and an extra section
+    - When I call LLMTextRedactionConfig.get_clause_legend
+    - Then each clause ID in the numbered prompt maps to its wording, without any
+      leading list marker, and extra sections are left out
+    """
+    config = _create_config(
+        include_rationale=True,
+        must_redact=["must redact X"],
+        do_not_redact=["- do not redact P", "do not redact Q"],
+        examples=["example 1"],
+        extra_sections={"EdgeCases": ["case A"]},
+    )
+
+    legend = config.get_clause_legend()
+
+    assert legend == {
+        "T1": "rule A",
+        "M1": "must redact X",
+        "D1": "do not redact P",
+        "D2": "do not redact Q",
+        "E1": "example 1",
+    }
+    system_prompt = config.create_system_prompt()
+    assert all(
+        f"[{clause_id}] {text}" in system_prompt for clause_id, text in legend.items()
+    )
+
+
+def test_llm_text_redaction_config__get_clause_legend__only_required_fields():
+    assert _create_config().get_clause_legend() == {"T1": "rule A"}
+
+
 def test_llm_text_redaction_config__default_chunk_settings():
     """
     - Given I create an llm redaction config without chunk settings

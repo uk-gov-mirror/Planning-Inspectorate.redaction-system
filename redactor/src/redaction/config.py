@@ -5,6 +5,14 @@ from pydantic import BaseModel, Field, model_validator
 from ..analysis.text import LLMTextAnalyserConfig
 from ..types import PydanticImage
 
+CLAUSE_SECTIONS = {
+    "redaction_terms": "T",
+    "must_redact": "M",
+    "do_not_redact": "D",
+    "examples": "E",
+}
+"""Config fields whose list items are cited by clause ID, with each ID prefix"""
+
 
 class InvalidRedactionConfigException(Exception):  # pragma: no cover
     pass
@@ -61,9 +69,9 @@ class LLMTextRedactionConfigBase(RedactionConfig, LLMTextAnalyserConfig):
 
 class LLMTextRedactionConfig(TextRedactionConfig, LLMTextRedactionConfigBase):
     def create_system_prompt(self) -> str:
-        def clause_ids(prefix: str) -> str | None:
+        def clause_ids(field: str) -> str | None:
             # Detailed responses cite these IDs to say which clause drove a decision
-            return prefix if self.include_rationale else None
+            return CLAUSE_SECTIONS[field] if self.include_rationale else None
 
         system_prompt_list: list[str] = []
         # Add the role, task and redaction_terms to redact
@@ -71,7 +79,10 @@ class LLMTextRedactionConfig(TextRedactionConfig, LLMTextRedactionConfigBase):
         system_prompt_list.append(xml_format(self.task, "Task"))
         system_prompt_list.append(
             xml_format(
-                self.redaction_terms, "Terms", as_list=True, id_prefix=clause_ids("T")
+                self.redaction_terms,
+                "Terms",
+                as_list=True,
+                id_prefix=clause_ids("redaction_terms"),
             )
         )
 
@@ -82,7 +93,7 @@ class LLMTextRedactionConfig(TextRedactionConfig, LLMTextRedactionConfigBase):
                     self.must_redact,
                     "MustRedact",
                     as_list=True,
-                    id_prefix=clause_ids("M"),
+                    id_prefix=clause_ids("must_redact"),
                 )
             )
 
@@ -93,7 +104,7 @@ class LLMTextRedactionConfig(TextRedactionConfig, LLMTextRedactionConfigBase):
                     self.do_not_redact,
                     "DoNotRedact",
                     as_list=True,
-                    id_prefix=clause_ids("D"),
+                    id_prefix=clause_ids("do_not_redact"),
                 )
             )
 
@@ -101,7 +112,10 @@ class LLMTextRedactionConfig(TextRedactionConfig, LLMTextRedactionConfigBase):
         if self.examples:
             system_prompt_list.append(
                 xml_format(
-                    self.examples, "Examples", as_list=True, id_prefix=clause_ids("E")
+                    self.examples,
+                    "Examples",
+                    as_list=True,
+                    id_prefix=clause_ids("examples"),
                 )
             )
 
@@ -113,6 +127,18 @@ class LLMTextRedactionConfig(TextRedactionConfig, LLMTextRedactionConfigBase):
             template=prompt_template_string,
         )
         return system_prompt_template.format()
+
+    def get_clause_legend(self) -> dict[str, str]:
+        """Map each clause ID that detailed responses cite to the clause's wording"""
+        return {
+            f"{prefix}{i}": strip_list_marker(item)
+            for field, prefix in CLAUSE_SECTIONS.items()
+            for i, item in enumerate(getattr(self, field) or [], start=1)
+        }
+
+
+def strip_list_marker(item: str) -> str:
+    return item[1:].lstrip() if item.startswith("-") else item
 
 
 def xml_format(
@@ -126,7 +152,7 @@ def xml_format(
     if isinstance(input, list):
         if as_list and id_prefix:
             joined_input = "\n".join(
-                f"- [{id_prefix}{i}] {x[1:].lstrip() if x.startswith('-') else x}"
+                f"- [{id_prefix}{i}] {strip_list_marker(x)}"
                 for i, x in enumerate(input, start=1)
             )
         elif as_list:
