@@ -166,14 +166,83 @@ class LLMTextRedactor(TextRedactor):
             system_prompt,
             text_chunks,
         )
+        chunk_ranges = self._locate_chunks(text_to_analyse, text_chunks)
+        chunk_summaries = []
+        for summary in llm_redaction_result.chunk_summaries:
+            char_start, char_end = chunk_ranges[summary["chunk_index"]] or (None, None)
+            chunk_summaries.append(
+                summary | {"char_start": char_start, "char_end": char_end}
+            )
         return LLMTextRedactionResult(
             rule_name=self.config.name,
             run_metrics=llm_redaction_result.run_metrics,
             redaction_strings=tuple(llm_redaction_result.redaction_strings),
             metadata=llm_redaction_result.metadata,
-            redaction_decisions=llm_redaction_result.redaction_decisions,
-            excluded_decisions=llm_redaction_result.excluded_decisions,
+            redaction_decisions=self._add_span_offsets(
+                llm_redaction_result.redaction_decisions, text_chunks, chunk_ranges
+            ),
+            excluded_decisions=self._add_span_offsets(
+                llm_redaction_result.excluded_decisions, text_chunks, chunk_ranges
+            ),
+            chunk_summaries=tuple(chunk_summaries),
+            clause_legend=(
+                self.config.get_clause_legend() if self.config.include_rationale else {}
+            ),
         )
+
+    @staticmethod
+    def _locate_chunks(
+        text: str, text_chunks: list[str]
+    ) -> list[tuple[int, int] | None]:
+        """Find the (start, end) character range of each chunk in the text, or None if
+        it cannot be found.
+
+        The splitter's own add_start_index is not used, since it subtracts the token
+        overlap from a character position and can skip past the true start
+        """
+        chunk_ranges = []
+        search_from = 0
+        for chunk_index, chunk in enumerate(text_chunks):
+            start = text.find(chunk, search_from)
+            if start == -1:
+                LoggingUtil().log_warning(
+                    f"Chunk {chunk_index} could not be located in the analysed text"
+                )
+                chunk_ranges.append(None)
+                continue
+            chunk_ranges.append((start, start + len(chunk)))
+            # Chunks are split in order, so each starts after the previous one
+            search_from = start + 1
+        return chunk_ranges
+
+    @staticmethod
+    def _add_span_offsets(
+        decisions: tuple[dict, ...],
+        text_chunks: list[str],
+        chunk_ranges: list[tuple[int, int] | None],
+    ) -> tuple[dict, ...]:
+        """Add the start offsets in the analysed text of each occurrence's span within
+        its chunk, so the span can be traced without storing the chunk. Only whole
+        words match, so a span such as 'her' is not found within 'another'"""
+        located = []
+        for decision in decisions:
+            span = decision["text"]
+            pattern = re.compile(rf"(?<!\w){re.escape(span)}(?!\w)") if span else None
+            occurrences = []
+            for occurrence in decision["occurrences"]:
+                chunk_index = occurrence["chunk_index"]
+                chunk_range = chunk_ranges[chunk_index]
+                span_offsets = (
+                    [
+                        chunk_range[0] + match.start()
+                        for match in pattern.finditer(text_chunks[chunk_index])
+                    ]
+                    if chunk_range and pattern
+                    else []
+                )
+                occurrences.append(occurrence | {"span_offsets": span_offsets})
+            located.append(decision | {"occurrences": occurrences})
+        return tuple(located)
 
     def redact(self) -> LLMTextRedactionResult:
         self.config: LLMTextRedactionConfig

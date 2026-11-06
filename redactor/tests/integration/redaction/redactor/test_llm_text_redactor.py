@@ -1,3 +1,4 @@
+from src.analysis.text import get_chunk_id
 from src.redaction.config import (
     LLMTextRedactionConfig,
 )
@@ -70,6 +71,56 @@ class TestRedact:
             f"\nExpected results {expected_results}\nActual results: {redaction_strings_cleaned}"
         )
         assert match_percent >= acceptance_threshold, error_message
+
+    def test_include_rationale_traces_spans_to_the_analysed_text(self):
+        """
+        - Given config with include_rationale enabled and a chunk size small enough
+          to split the text into overlapping chunks
+        - When the LLMTextRedactor redacts the text
+        - Then every chunk summary covers exactly its chunk, and every span offset
+          points at the decision's text inside its chunk's range
+        """
+        source_text = (
+            "Joan Brown of 12 Mill Lane objects to the proposal. Her neighbour, "
+            "Mary Jones, says the extension would block light to her garden.\n\n"
+            "Cllr Raj Patel spoke in support. Joan Brown replied that the hedge "
+            "on Mill Lane is protected and asked that Mary Jones be consulted."
+        )
+        config = LLMTextRedactionConfig(
+            name="config name",
+            redactor_type="LLMTextRedaction",
+            model="gpt-5.6-luna",
+            text=source_text,
+            role="You redact personal data from planning representations.",
+            task="Find the personal data of members of the public in the text.",
+            redaction_terms=["Names of members of the public", "Home addresses"],
+            do_not_redact=["Names of elected councillors"],
+            include_rationale=True,
+            max_tokens=3000,
+            chunk_size=30,
+            chunk_overlap=5,
+        )
+        chunks = config.create_text_splitter().split_text(source_text)
+
+        result = LLMTextRedactor(config).redact()
+
+        assert len(chunks) > 1
+        assert result.clause_legend == config.get_clause_legend()
+        for summary, chunk in zip(result.chunk_summaries, chunks, strict=True):
+            assert summary["chunk_id"] == get_chunk_id(chunk)
+            assert source_text[summary["char_start"] : summary["char_end"]] == chunk
+
+        span_offsets = []
+        for decision in result.redaction_decisions + result.excluded_decisions:
+            for occurrence in decision["occurrences"]:
+                summary = result.chunk_summaries[occurrence["chunk_index"]]
+                for offset in occurrence["span_offsets"]:
+                    end = offset + len(decision["text"])
+                    assert source_text[offset:end] == decision["text"]
+                    assert summary["char_start"] <= offset
+                    assert end <= summary["char_end"]
+                    span_offsets.append(offset)
+        assert span_offsets, result.redaction_decisions
 
     def test_empty_text_returns_empty_result(self):
         """

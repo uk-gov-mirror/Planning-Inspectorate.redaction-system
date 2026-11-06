@@ -161,7 +161,10 @@ class LLMTextRedactionResult(TextRedactionResult):
     enabled"""
     chunk_summaries: tuple[dict, ...] = field(default_factory=tuple)
     """The index, stable ID and status ("ok", "failed" or "skipped") of each chunk
-    sent to the LLM"""
+    sent to the LLM, plus its character range in the analysed text when known"""
+    clause_legend: dict[str, str] = field(default_factory=dict)
+    """The wording of each clause ID cited by the decisions. Only set when the
+    analyser's include_rationale is enabled"""
 
 
 @dataclass(frozen=True)

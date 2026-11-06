@@ -61,4 +61,5 @@ class TestImageTextRedactorBase:
         cleaned_results.pop("redaction_decisions", None)
         cleaned_results.pop("excluded_decisions", None)
         cleaned_results.pop("chunk_summaries", None)
+        cleaned_results.pop("clause_legend", None)
         return cleaned_results
