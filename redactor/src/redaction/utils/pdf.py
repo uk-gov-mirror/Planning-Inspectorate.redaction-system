@@ -1,4 +1,7 @@
+import math
+from bisect import bisect_right
 from io import BytesIO
+from typing import Any
 
 import numpy as np
 import pymupdf
@@ -902,3 +905,79 @@ class PDFUtil:
         # Transform the normalised bounding box
         transformed = normalised_bbox.transform(image_transform)
         return transformed
+
+    @staticmethod
+    def get_page_offsets(pages: list[PDFPageMetadata]) -> list[tuple[int, int]]:
+        """
+        Get the (1-based page number, start offset) of each page within the text made
+        by joining the pages' raw text with newlines
+        """
+        page_offsets = []
+        start = 0
+        for page in pages:
+            page_offsets.append((page.page_number + 1, start))
+            start += len(page.raw_text) + 1
+        return page_offsets
+
+    @staticmethod
+    def get_pages_in_range(
+        page_offsets: list[tuple[int, int]], start: int | None, end: int | None
+    ) -> list[int]:
+        """Get the 1-based numbers of the pages that the character range [start, end)
+        overlaps"""
+        if start is None or end is None or not page_offsets:
+            return []
+        page_starts = [page_start for _, page_start in page_offsets]
+        first = max(bisect_right(page_starts, start) - 1, 0)
+        last = max(bisect_right(page_starts, max(start, end - 1)) - 1, 0)
+        return [page_number for page_number, _ in page_offsets[first : last + 1]]
+
+    @classmethod
+    def add_pages_to_decision(
+        cls,
+        decision: dict[str, Any],
+        page_offsets: list[tuple[int, int]],
+        chunk_pages: dict[int, list[int]],
+        highlight_pages: set[int] | None = None,
+    ) -> dict[str, Any]:
+        """Add the pages of each occurrence's span, falling back to its chunk's pages
+        when the span was not found verbatim.
+
+        :param highlight_pages: The pages the term is highlighted on, if it was. These
+            are the term's pages, and limit each occurrence to the pages it could be on
+        """
+        span_length = len(decision["text"])
+        occurrences = []
+        for occurrence in decision["occurrences"]:
+            span_offsets = occurrence.get("span_offsets")
+            pages = (
+                sorted(
+                    {
+                        page
+                        for offset in span_offsets
+                        for page in cls.get_pages_in_range(
+                            page_offsets, offset, offset + span_length
+                        )
+                    }
+                )
+                if span_offsets
+                else chunk_pages.get(occurrence["chunk_index"], [])
+            )
+            if highlight_pages:
+                pages = [p for p in pages if p in highlight_pages] or sorted(
+                    highlight_pages
+                )
+            occurrences.append(occurrence | {"pages": pages})
+        return decision | {
+            "pages": sorted(highlight_pages)
+            if highlight_pages
+            else sorted({page for o in occurrences for page in o["pages"]}),
+            "occurrences": occurrences,
+        }
+
+    @staticmethod
+    def sort_by_first_page(decisions: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        return sorted(
+            decisions,
+            key=lambda d: (d["pages"][0] if d["pages"] else math.inf, d["text"]),
+        )
