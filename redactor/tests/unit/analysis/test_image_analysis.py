@@ -177,6 +177,41 @@ class TestGetClient(TestAzureImageAnalyserBase):
             AzureImageAnalyser._get_client()
 
 
+class TestAzureVisionAnalysisRateLimit(TestAzureImageAnalyserBase):
+    @pytest.fixture(autouse=True)
+    def _reset_rate_limiter(self):
+        AzureImageAnalyser._RATE_LIMITER = None
+        yield
+        AzureImageAnalyser._RATE_LIMITER = None
+
+    def test_waits_for_shared_rate_limiter_before_each_request(self, monkeypatch):
+        monkeypatch.setenv("VISION_REQUESTS_PER_MINUTE", "15")
+        image = Image.new("RGB", (100, 100))
+        client = Mock()
+
+        with (
+            patch.object(AzureImageAnalyser, "_get_client", return_value=client),
+            patch("src.analysis.images.RateLimiter") as mock_rate_limiter,
+        ):
+            for _ in range(2):
+                AzureImageAnalyser._azure_vision_analysis(image, [])
+
+        mock_rate_limiter.assert_called_once_with(15)
+        assert mock_rate_limiter.return_value.wait.call_count == 2
+
+    def test_no_rate_limiter_when_unset(self, monkeypatch):
+        monkeypatch.delenv("VISION_REQUESTS_PER_MINUTE", raising=False)
+        image = Image.new("RGB", (100, 100))
+
+        with (
+            patch.object(AzureImageAnalyser, "_get_client", return_value=Mock()),
+            patch("src.analysis.images.RateLimiter") as mock_rate_limiter,
+        ):
+            AzureImageAnalyser._azure_vision_analysis(image, [])
+
+        mock_rate_limiter.assert_not_called()
+
+
 class TestDetectFaces(TestAzureImageAnalyserBase):
     @staticmethod
     def _mock_vision_result_people(people):

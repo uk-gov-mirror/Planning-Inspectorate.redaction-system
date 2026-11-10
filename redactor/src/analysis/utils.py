@@ -1,7 +1,26 @@
 import os
+import time
 from threading import Condition, Lock
 
 from ..monitoring import LoggingUtil, log_to_appins
+
+
+class RateLimiter:
+    """Spaces calls from all threads at least 60 / requests_per_minute seconds apart."""
+
+    def __init__(self, requests_per_minute: int):
+        self.interval = 60 / requests_per_minute
+        self._lock = Lock()
+        self._next_call = 0.0
+
+    def wait(self) -> None:
+        """Block until the calling thread's turn to make a request."""
+        with self._lock:
+            now = time.monotonic()
+            delay = max(0.0, self._next_call - now)
+            self._next_call = max(now, self._next_call) + self.interval
+        if delay:
+            time.sleep(delay)
 
 
 class TokenSemaphore:
