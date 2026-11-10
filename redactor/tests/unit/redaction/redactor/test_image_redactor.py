@@ -1,4 +1,5 @@
 import contextlib
+import threading
 from unittest import mock
 
 from PIL import Image
@@ -243,3 +244,26 @@ class TestRedact(TestImageRedactorBase):
         assert "total_signature_analysis_time" in actual.run_metrics
         assert "total_image_analysis_time" in actual.run_metrics
         assert actual.run_metrics["total_images_to_analyse"] == 1
+
+    def test_face_and_signature_detection_run_concurrently(self):
+        images = [Image.new("RGB", (100, 100))]
+        # Each detector waits for the other, so both only finish if they overlap
+        barrier = threading.Barrier(2, timeout=5)
+
+        def detect(*args):
+            barrier.wait()
+            return [(images[0], ())]
+
+        inst = self.setup_image_redactor(images)
+
+        with (
+            mock.patch.object(
+                AzureImageAnalyser, "detect_faces_in_images", side_effect=detect
+            ),
+            mock.patch.object(
+                SignatureDetector, "detect_signatures_in_images", side_effect=detect
+            ),
+        ):
+            actual = inst.redact()
+
+        assert actual.redaction_results == ()
