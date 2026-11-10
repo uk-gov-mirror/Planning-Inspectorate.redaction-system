@@ -1,6 +1,6 @@
 import time
 from concurrent.futures import ThreadPoolExecutor
-from threading import Event
+from threading import Event, Lock
 from typing import ClassVar
 from unittest.mock import Mock, patch
 
@@ -313,6 +313,47 @@ class TestAzureVisionAnalysisRateLimit(TestAzureImageAnalyserBase):
             AzureImageAnalyser._azure_vision_analysis(image, [])
 
         mock_rate_limiter.assert_not_called()
+
+
+class TestAzureVisionConcurrencyLimit(TestAzureImageAnalyserBase):
+    @pytest.fixture(autouse=True)
+    def _reset_call_limits(self):
+        AzureImageAnalyser._CALL_LIMITS.clear()
+        yield
+        AzureImageAnalyser._CALL_LIMITS.clear()
+
+    def test_limits_concurrent_calls_across_thread_pools(self, monkeypatch):
+        monkeypatch.setenv("VISION_MAX_WORKERS", "2")
+        image = Image.new("RGB", (100, 100))
+        lock = Lock()
+        active = 0
+        peak = 0
+
+        def analyze(*args):
+            nonlocal active, peak
+            with lock:
+                active += 1
+                peak = max(peak, active)
+            time.sleep(0.05)
+            with lock:
+                active -= 1
+
+        client = Mock()
+        client.analyze.side_effect = analyze
+
+        with (
+            patch.object(AzureImageAnalyser, "_get_client", return_value=client),
+            ThreadPoolExecutor(max_workers=6) as executor,
+        ):
+            list(
+                executor.map(
+                    lambda _: AzureImageAnalyser._azure_vision_analysis(image, []),
+                    range(6),
+                )
+            )
+
+        assert client.analyze.call_count == 6
+        assert peak <= 2
 
 
 class TestDetectFaces(TestAzureImageAnalyserBase):

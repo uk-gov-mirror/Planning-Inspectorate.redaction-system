@@ -3,7 +3,7 @@ import os
 from collections.abc import Callable
 from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from io import BytesIO
-from threading import Lock
+from threading import Lock, Semaphore
 from typing import ClassVar
 
 from azure.ai.vision.imageanalysis import ImageAnalysisClient
@@ -38,9 +38,21 @@ class ImageAnalyser:
     CACHE_LOCK = Lock()
     MAX_WORKERS_ENV_VAR: ClassVar[str | None] = None
     _IN_FLIGHT_REQUESTS: ClassVar[dict[tuple[int, str], Future]] = {}
+    _CALL_LIMITS: ClassVar[dict[type, Semaphore]] = {}
+    _CALL_LIMITS_LOCK: ClassVar[Lock] = Lock()
 
     class EndpointNotSetError(EnvironmentError):
         pass
+
+    @classmethod
+    def _call_limit(cls) -> Semaphore:
+        """Limit the calls to this service across every thread pool using it."""
+        with cls._CALL_LIMITS_LOCK:
+            if cls not in cls._CALL_LIMITS:
+                cls._CALL_LIMITS[cls] = Semaphore(
+                    get_max_workers(env_var=cls.MAX_WORKERS_ENV_VAR)
+                )
+            return cls._CALL_LIMITS[cls]
 
     @classmethod
     def _fetch_once(cls, cache: dict, image_hash: str, fetch: Callable):
@@ -358,11 +370,12 @@ class AzureImageAnalyser(ImageAnalyser):
             f"Analysing image using Azure Computer Vision API for features: {visual_features}..."
         )
         try:
-            cls._wait_for_rate_limit()
-            result = cls._get_client().analyze(
-                image_bytes,
-                visual_features,
-            )
+            with cls._call_limit():
+                cls._wait_for_rate_limit()
+                result = cls._get_client().analyze(
+                    image_bytes,
+                    visual_features,
+                )
             return result
         except HttpResponseError as e:
             LoggingUtil().log_exception_with_message(
@@ -493,12 +506,13 @@ class SignatureDetector(ImageAnalyser):
             LoggingUtil().log_info(
                 "Analysing image for signatures using signature detector app..."
             )
-            response = post(
-                f"https://{cls._get_endpoint()}/score",
-                json={"image": image_bytes.hex(), "threshold": 0.0},
-                headers={"Content-Type": "application/json"},
-                timeout=120,
-            )
+            with cls._call_limit():
+                response = post(
+                    f"https://{cls._get_endpoint()}/score",
+                    json={"image": image_bytes.hex(), "threshold": 0.0},
+                    headers={"Content-Type": "application/json"},
+                    timeout=120,
+                )
             response.raise_for_status()
             return response.json().get("detections", [])
 
