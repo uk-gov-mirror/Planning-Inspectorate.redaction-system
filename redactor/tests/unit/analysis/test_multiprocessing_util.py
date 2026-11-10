@@ -62,3 +62,15 @@ def test__get_max_workers():
     assert get_max_workers(0) == 1
     assert get_max_workers(1000) == max_workers
     assert get_max_workers() == max_workers
+
+
+def test__get_max_workers__env_var_replaces_cpu_cap(monkeypatch):
+    monkeypatch.setenv("TEST_MAX_WORKERS", "16")
+    assert get_max_workers(env_var="TEST_MAX_WORKERS") == 16
+    assert get_max_workers(1000, env_var="TEST_MAX_WORKERS") == 16
+    assert get_max_workers(2, env_var="TEST_MAX_WORKERS") == 2
+
+
+def test__get_max_workers__env_var_is_capped_at_32(monkeypatch):
+    monkeypatch.setenv("TEST_MAX_WORKERS", "100")
+    assert get_max_workers(env_var="TEST_MAX_WORKERS") == 32

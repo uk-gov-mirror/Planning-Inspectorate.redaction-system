@@ -218,7 +218,9 @@ class LLMTextAnalyser:
     def _set_workers(self, n: int | None = None) -> int:
         """Determine the number of worker threads to use, capped at 32 or
         (os.cpu_count() or 1) + 4."""
-        self.config.max_concurrent_requests = get_max_workers(n)
+        self.config.max_concurrent_requests = get_max_workers(
+            n, env_var="LLM_MAX_WORKERS"
+        )
 
     @log_to_appins
     def _num_tokens_consumed(

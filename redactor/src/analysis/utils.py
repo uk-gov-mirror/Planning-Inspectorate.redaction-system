@@ -50,14 +50,19 @@ class TokenSemaphore:
         self.release()
 
 
-def get_max_workers(n: int | None = None) -> int:
+def get_max_workers(n: int | None = None, env_var: str | None = None) -> int:
     """Determine the number of worker threads to use, capped at 32 or
     (os.cpu_count() or 1) + 4.
 
     :param int n: Desired number of workers. If None, use system default.
+    :param str env_var: Name of an environment variable that replaces the
+    cpu-based cap when set. The cap is still limited to 32.
     :return int: The number of worker threads to use.
     """
     max_workers = min(32, (os.cpu_count() or 1) + 4)
+    configured_cap = os.environ.get(env_var) if env_var else None
+    if configured_cap:
+        max_workers = min(32, max(1, int(configured_cap)))
     if n is not None:
         if n < 1:
             return 1

@@ -35,6 +35,7 @@ def handle_last_retry_error(retry_state):
 
 class ImageAnalyser:
     CACHE_LOCK = Lock()
+    MAX_WORKERS_ENV_VAR: ClassVar[str | None] = None
 
     class EndpointNotSetError(EnvironmentError):
         pass
@@ -121,7 +122,7 @@ class ImageAnalyser:
         :returns: A list of tuples containing the image and the detected objects
         """
         responses: list[tuple[Image.Image, tuple[str, tuple]]] = []
-        max_workers = get_max_workers()
+        max_workers = get_max_workers(env_var=cls.MAX_WORKERS_ENV_VAR)
         LoggingUtil().log_info(
             f"Detecting {object_to_detect}s in {len(images)} images using up to "
             f"{max_workers} workers..."
@@ -175,6 +176,7 @@ class ImageAnalyser:
 
 
 class AzureImageAnalyser(ImageAnalyser):
+    MAX_WORKERS_ENV_VAR: ClassVar[str | None] = "VISION_MAX_WORKERS"
     _IMAGE_TEXT_CACHE: ClassVar[dict[str, tuple]] = {}
     _IMAGE_FACE_CACHE: ClassVar[dict[str, tuple]] = {}
     _VISION_CLIENT: ClassVar[ImageAnalysisClient | None] = None
@@ -365,6 +367,7 @@ class AzureImageAnalyser(ImageAnalyser):
 
 
 class SignatureDetector(ImageAnalyser):
+    MAX_WORKERS_ENV_VAR: ClassVar[str | None] = "SIGNATURE_MAX_WORKERS"
     _IMAGE_CACHE: ClassVar[dict[str, list]] = {}
     _ENDPOINT: ClassVar[str | None] = None
 
