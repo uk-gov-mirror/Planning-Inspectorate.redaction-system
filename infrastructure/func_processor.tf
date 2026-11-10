@@ -54,6 +54,7 @@ resource "azurerm_linux_function_app" "processor" {
     "LLM_TOKEN_RATE_LIMIT"                          = var.openai_quotas.gpt_56_luna * 1000
     "LLM_REQUEST_RATE_LIMIT"                        = var.openai_quotas.gpt_56_luna
     "LLM_QUOTA_ALLOCATION"                          = var.llm_quota_allocation
+    "RULE_MAX_WORKERS"                              = var.rule_max_workers
   }
 }
 

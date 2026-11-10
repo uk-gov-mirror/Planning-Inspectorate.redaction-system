@@ -110,3 +110,9 @@ variable "llm_quota_allocation" {
   type        = number
   default     = 0.5
 }
+
+variable "rule_max_workers" {
+  description = "The max redaction rules that the processor runs at the same time for a document, where 1 runs them one at a time"
+  type        = number
+  default     = 4
+}
