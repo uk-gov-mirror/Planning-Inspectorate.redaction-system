@@ -1,3 +1,6 @@
+import time
+from concurrent.futures import ThreadPoolExecutor
+from threading import Event
 from typing import ClassVar
 from unittest.mock import Mock, patch
 
@@ -63,6 +66,106 @@ class TestClearCache:
 
         ConcreteAnalysisUtil.clear_cache()
         assert len(ConcreteAnalysisUtil._IMAGE_TEST_CACHE) == 0
+
+
+class TestFetchOnce:
+    def test_concurrent_callers_share_one_fetch(self):
+        calls = []
+
+        def fetch():
+            calls.append(1)
+            time.sleep(0.2)
+            return ("result",)
+
+        with ThreadPoolExecutor(max_workers=5) as executor:
+            results = list(
+                executor.map(
+                    lambda _: ConcreteAnalysisUtil._fetch_once(
+                        ConcreteAnalysisUtil._IMAGE_TEST_CACHE, "hash", fetch
+                    ),
+                    range(5),
+                )
+            )
+
+        assert len(calls) == 1
+        assert results == [("result",)] * 5
+
+    def test_failed_fetch_is_not_cached_and_can_be_retried(self):
+        cache = ConcreteAnalysisUtil._IMAGE_TEST_CACHE
+
+        with pytest.raises(ImageAnalysisError):
+            ConcreteAnalysisUtil._fetch_once(
+                cache, "hash", Mock(side_effect=ImageAnalysisError("boom"))
+            )
+        result = ConcreteAnalysisUtil._fetch_once(
+            cache, "hash", Mock(return_value=("ok",))
+        )
+
+        assert result == ("ok",)
+        assert cache["hash"] == ("ok",)
+
+    def test_waiting_callers_get_the_failure_and_a_later_call_retries(self):
+        cache = ConcreteAnalysisUtil._IMAGE_TEST_CACHE
+        owner_started = Event()
+        release_owner = Event()
+        waiter_fetch = Mock(return_value=("unused",))
+
+        def failing_fetch():
+            owner_started.set()
+            release_owner.wait(timeout=5)
+            raise ImageAnalysisError("image analysis failed")
+
+        with (
+            patch("src.analysis.images.LoggingUtil") as mock_logger,
+            ThreadPoolExecutor(max_workers=4) as executor,
+        ):
+            # Start a fetch that blocks until the test releases it
+            owner = executor.submit(
+                ConcreteAnalysisUtil._fetch_once, cache, "hash", failing_fetch
+            )
+            assert owner_started.wait(timeout=5)
+
+            # Start additional fetches for the same image while fetch is running
+            waiters = [
+                executor.submit(
+                    ConcreteAnalysisUtil._fetch_once, cache, "hash", waiter_fetch
+                )
+                for _ in range(3)
+            ]
+
+            # Release the owner only once every waiter is blocked on its request
+            log_info = mock_logger.return_value.log_info
+            deadline = time.monotonic() + 5
+            while (
+                sum("Waiting" in call.args[0] for call in log_info.call_args_list) < 3
+                and time.monotonic() < deadline
+            ):
+                time.sleep(0.01)
+            release_owner.set()
+
+            # Check that all futures raised the expected exception
+            for future in [owner, *waiters]:
+                with pytest.raises(ImageAnalysisError, match="image analysis failed"):
+                    future.result(timeout=5)
+
+        # Waiter threads should not have called the fetch function since the owner failed
+        waiter_fetch.assert_not_called()
+        assert "hash" not in cache
+        assert ConcreteAnalysisUtil._IN_FLIGHT_REQUESTS == {}
+
+        # Retry to ensure it works correctly after a failed fetch
+        retried = ConcreteAnalysisUtil._fetch_once(
+            cache, "hash", Mock(return_value=("ok",))
+        )
+        assert retried == ("ok",)
+        assert cache["hash"] == ("ok",)
+        assert ConcreteAnalysisUtil._IN_FLIGHT_REQUESTS == {}
+
+    def test_none_result_is_not_cached(self):
+        cache = ConcreteAnalysisUtil._IMAGE_TEST_CACHE
+
+        assert ConcreteAnalysisUtil._fetch_once(cache, "hash", lambda: None) is None
+        assert "hash" not in cache
 
 
 class TestImageDetection:

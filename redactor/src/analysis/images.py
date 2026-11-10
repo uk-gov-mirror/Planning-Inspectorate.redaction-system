@@ -1,6 +1,7 @@
 import hashlib
 import os
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from collections.abc import Callable
+from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from io import BytesIO
 from threading import Lock
 from typing import ClassVar
@@ -36,9 +37,60 @@ def handle_last_retry_error(retry_state):
 class ImageAnalyser:
     CACHE_LOCK = Lock()
     MAX_WORKERS_ENV_VAR: ClassVar[str | None] = None
+    _IN_FLIGHT_REQUESTS: ClassVar[dict[tuple[int, str], Future]] = {}
 
     class EndpointNotSetError(EnvironmentError):
         pass
+
+    @classmethod
+    def _fetch_once(cls, cache: dict, image_hash: str, fetch: Callable):
+        """
+        Return the cached result for the image, calling fetch() in only one thread
+        when several threads miss the cache for the same image at the same time.
+
+        :param dict cache: The cache of results, keyed by image hash
+        :param str image_hash: The content hash of the image
+        :param Callable fetch: Gets the result, or None if it should not be cached
+        """
+        key = (id(cache), image_hash)
+        with cls.CACHE_LOCK:
+            if image_hash in cache:
+                LoggingUtil().log_info("Using cached image analysis result.")
+                return cache[image_hash]
+            future = cls._IN_FLIGHT_REQUESTS.get(key)
+
+            # Check if this thread is the one responsible for fetching the result
+            is_owner = future is None
+            if is_owner:
+                future = cls._IN_FLIGHT_REQUESTS[key] = Future()
+
+        # Wait for the result of the owner thread
+        if not is_owner:
+            LoggingUtil().log_info("Waiting for an in-progress analysis of this image.")
+            return future.result()
+
+        try:
+            # Get the analysis result for this image
+            result = fetch()
+        except BaseException as e:
+            with cls.CACHE_LOCK:
+                # Remove the in-flight request entry for this key since fetching failed
+                del cls._IN_FLIGHT_REQUESTS[key]
+
+            # Notify other threads of the failure
+            future.set_exception(e)
+            raise
+
+        with cls.CACHE_LOCK:
+            if result is not None:
+                cache[image_hash] = result
+            # Remove the in-flight request entry for this key since fetching succeeded
+            del cls._IN_FLIGHT_REQUESTS[key]
+
+        # Notify other threads that the result is available
+        future.set_result(result)
+
+        return result
 
     @classmethod
     def clear_cache(cls):
@@ -238,16 +290,12 @@ class AzureImageAnalyser(ImageAnalyser):
                   with confidence above the threshold
         """
         image_hash = cls.get_image_hash(image)
-        with cls.CACHE_LOCK:
-            faces_detected = cls._IMAGE_FACE_CACHE.get(image_hash)
-        if faces_detected is not None:
-            LoggingUtil().log_info("Using cached face detection result.")
-        else:
+
+        def fetch():
             result = cls._azure_vision_analysis(image, [VisualFeatures.PEOPLE])
             if result is None:
-                return ()
-
-            faces_detected = tuple(
+                return None
+            return tuple(
                 {
                     "box": (
                         person.bounding_box.x,
@@ -260,9 +308,9 @@ class AzureImageAnalyser(ImageAnalyser):
                 for person in result.people.list
             )
 
-            # Cache result
-            with cls.CACHE_LOCK:
-                cls._IMAGE_FACE_CACHE[image_hash] = faces_detected
+        faces_detected = cls._fetch_once(cls._IMAGE_FACE_CACHE, image_hash, fetch)
+        if faces_detected is None:
+            return ()
 
         return tuple(
             person["box"]
@@ -349,36 +397,28 @@ class AzureImageAnalyser(ImageAnalyser):
         detected in the image, as a 2D tuple of <word, bounding box>.
         """
         image_hash = cls.get_image_hash(image)
-        with cls.CACHE_LOCK:
-            text_detected = cls._IMAGE_TEXT_CACHE.get(image_hash)
-        if text_detected is not None:
-            LoggingUtil().log_info("Using cached text detection result.")
-            return text_detected
 
-        result = cls._azure_vision_analysis(image, [VisualFeatures.READ])
-        if result is None:
-            return ()
-
-        text_detected = tuple(
-            (
-                word.text,
+        def fetch():
+            result = cls._azure_vision_analysis(image, [VisualFeatures.READ])
+            if result is None:
+                return None
+            return tuple(
                 (
-                    word.bounding_polygon[0].x,
-                    word.bounding_polygon[0].y,
-                    word.bounding_polygon[2].x,
-                    word.bounding_polygon[2].y,
-                ),
+                    word.text,
+                    (
+                        word.bounding_polygon[0].x,
+                        word.bounding_polygon[0].y,
+                        word.bounding_polygon[2].x,
+                        word.bounding_polygon[2].y,
+                    ),
+                )
+                for block in result.read.blocks
+                for line in block.lines
+                for word in line.words
             )
-            for block in result.read.blocks
-            for line in block.lines
-            for word in line.words
-        )
 
-        # Cache result
-        with cls.CACHE_LOCK:
-            cls._IMAGE_TEXT_CACHE[image_hash] = text_detected
-
-        return text_detected
+        text_detected = cls._fetch_once(cls._IMAGE_TEXT_CACHE, image_hash, fetch)
+        return () if text_detected is None else text_detected
 
 
 class SignatureDetector(ImageAnalyser):
@@ -447,33 +487,22 @@ class SignatureDetector(ImageAnalyser):
             return ()
 
         image_hash = cls.get_image_hash(image)
-        with cls.CACHE_LOCK:
-            cached = cls._IMAGE_CACHE.get(image_hash)
-        if cached is not None:
-            LoggingUtil().log_info("Using cached signature detection result.")
-            return tuple(
-                cls._get_bounding_box(d)
-                for d in cached
-                if d["score"] >= confidence_threshold
+
+        def fetch():
+            image_bytes = cls._save_image_to_bytes(image)
+            LoggingUtil().log_info(
+                "Analysing image for signatures using signature detector app..."
             )
+            response = post(
+                f"https://{cls._get_endpoint()}/score",
+                json={"image": image_bytes.hex(), "threshold": 0.0},
+                headers={"Content-Type": "application/json"},
+                timeout=120,
+            )
+            response.raise_for_status()
+            return response.json().get("detections", [])
 
-        image_bytes = cls._save_image_to_bytes(image)
-
-        LoggingUtil().log_info(
-            "Analysing image for signatures using signature detector app..."
-        )
-        response = post(
-            f"https://{cls._get_endpoint()}/score",
-            json={"image": image_bytes.hex(), "threshold": 0.0},
-            headers={"Content-Type": "application/json"},
-            timeout=120,
-        )
-        response.raise_for_status()
-        result = response.json()
-        detections = result.get("detections", [])
-
-        with cls.CACHE_LOCK:
-            cls._IMAGE_CACHE[image_hash] = detections
+        detections = cls._fetch_once(cls._IMAGE_CACHE, image_hash, fetch)
 
         return tuple(
             cls._get_bounding_box(d)
