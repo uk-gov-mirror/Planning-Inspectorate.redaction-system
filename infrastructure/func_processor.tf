@@ -51,6 +51,9 @@ resource "azurerm_linux_function_app" "processor" {
     "VISION_MAX_WORKERS"                            = var.worker_caps.vision
     "SIGNATURE_MAX_WORKERS"                         = var.worker_caps.signature
     "VISION_REQUESTS_PER_MINUTE"                    = var.vision_requests_per_minute
+    "LLM_TOKEN_RATE_LIMIT"                          = var.openai_quotas.gpt_56_luna * 1000
+    "LLM_REQUEST_RATE_LIMIT"                        = var.openai_quotas.gpt_56_luna
+    "LLM_QUOTA_ALLOCATION"                          = var.llm_quota_allocation
   }
 }
 

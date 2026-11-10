@@ -104,3 +104,9 @@ variable "vision_requests_per_minute" {
   type        = number
   default     = 15 # Vision F0 allows 20 per minute
 }
+
+variable "llm_quota_allocation" {
+  description = "The share (0 to 1) of the OpenAI deployment's quota that each processor function app instance may use"
+  type        = number
+  default     = 0.5
+}
