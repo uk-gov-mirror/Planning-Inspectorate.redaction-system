@@ -267,3 +267,25 @@ class TestRedact(TestImageRedactorBase):
             actual = inst.redact()
 
         assert actual.redaction_results == ()
+
+    def test_images_are_loaded_before_detection(self):
+        images = [Image.new("RGB", (100, 100))]
+        inst = self.setup_image_redactor(images)
+        loaded_before_detection = []
+
+        def detect(*args):
+            loaded_before_detection.append(mock_load.called)
+            return [(images[0], ())]
+
+        with (
+            mock.patch.object(images[0], "load", wraps=images[0].load) as mock_load,
+            mock.patch.object(
+                AzureImageAnalyser, "detect_faces_in_images", side_effect=detect
+            ),
+            mock.patch.object(
+                SignatureDetector, "detect_signatures_in_images", side_effect=detect
+            ),
+        ):
+            inst.redact()
+
+        assert loaded_before_detection == [True, True]

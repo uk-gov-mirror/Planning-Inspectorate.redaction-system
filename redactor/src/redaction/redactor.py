@@ -220,6 +220,10 @@ class ImageRedactor(Redactor):  # pragma: no cover
 
         thresholds = self.config.confidence_thresholds
 
+        # Lazily loaded images are not thread-safe to load, so load them up front
+        for image in self.config.images:
+            image.load()
+
         def detect(detection_function, detection_type):
             with TimerUtil() as timer:
                 results: list[tuple[Image.Image, tuple[str, tuple]]] = (
