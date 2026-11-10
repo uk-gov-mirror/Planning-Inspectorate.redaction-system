@@ -1,3 +1,5 @@
+import threading
+import time
 from datetime import UTC, datetime
 from io import BytesIO
 from unittest.mock import MagicMock, Mock, patch
@@ -714,6 +716,100 @@ class TestApplyRedactionRules(TestExamineApplyRedactionsBase):
         assert list(image_rule.images) == [page_image]
 
 
+class TestApplyRedactionRulesConcurrently:
+    @staticmethod
+    def result(name):
+        return TextRedactionResult(rule_name=name, run_metrics={}, redaction_strings=())
+
+    def apply_rules(self, redact_functions):
+        """Apply one text rule per function, each of which implements its redact"""
+        rules = []
+        for i in range(len(redact_functions)):
+            rule = Mock(spec=["name", "redactor_type", "text"])
+            rule.name = f"rule {i}"
+            rule.redactor_type = "llm_text"
+            rules.append(rule)
+        redactors = [Mock(redact=redact) for redact in redact_functions]
+
+        with patch(
+            "src.redaction.file_processor.RedactorFactory.get",
+            side_effect=[lambda config, r=r: r for r in redactors],
+        ):
+            processor = PDFProcessor()
+            processor.redaction_rules = rules
+            processor.pages_metadata = []
+            processor.pdf_images = []
+            processor._apply_redaction_rules()
+        return processor
+
+    def test_rules_run_at_the_same_time(self):
+        # Each rule waits for the other, so both only finish if they overlap
+        barrier = threading.Barrier(2, timeout=5)
+
+        def redact():
+            barrier.wait()
+            return self.result("rule")
+
+        processor = self.apply_rules([redact, redact])
+
+        assert len(processor.redaction_results) == 2
+
+    def test_results_are_recorded_in_rule_order(self):
+        second_done = threading.Event()
+
+        def redact_first():
+            # Finish after the second rule, which is recorded later
+            second_done.wait(timeout=5)
+            return self.result("first")
+
+        def redact_second():
+            second_done.set()
+            return self.result("second")
+
+        processor = self.apply_rules([redact_first, redact_second])
+
+        assert [r.rule_name for r in processor.redaction_results] == [
+            "first",
+            "second",
+        ]
+
+    def test_raises_the_error_of_the_first_failing_rule(self):
+        second_failed = threading.Event()
+
+        def redact_first():
+            second_failed.wait(timeout=5)
+            raise ValueError("first")
+
+        def redact_second():
+            try:
+                raise ValueError("second")
+            finally:
+                second_failed.set()
+
+        with pytest.raises(ValueError, match="first"):
+            self.apply_rules([redact_first, redact_second])
+
+    def test_rule_max_workers_of_one_runs_rules_one_at_a_time(self, monkeypatch):
+        monkeypatch.setenv("RULE_MAX_WORKERS", "1")
+        lock = threading.Lock()
+        active = 0
+        peak = 0
+
+        def redact():
+            nonlocal active, peak
+            with lock:
+                active += 1
+                peak = max(peak, active)
+            time.sleep(0.05)
+            with lock:
+                active -= 1
+            return self.result("rule")
+
+        self.apply_rules([redact, redact, redact])
+
+        assert peak == 1
+
+
 class TestExtractPDFTextContent(TestExamineApplyRedactionsBase):
     def test_pdf_with_text_returns_text_content(self):
         text_on_page = "Hello World"
@@ -1001,6 +1097,7 @@ class TestRedact:
             "text_analysis_total_time",
             "image_analysis_total_time",
             "analysis_total_time",
+            "analysis_wall_time",
             "text_redaction_apply_time",
             "image_redaction_apply_time",
             "result_metrics",

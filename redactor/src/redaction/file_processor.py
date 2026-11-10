@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import os
 import re
 from abc import ABC, abstractmethod
 from collections.abc import Generator
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
 from io import BytesIO
 from typing import TYPE_CHECKING, Any, ClassVar
@@ -667,11 +669,15 @@ class PDFProcessor(FileProcessor):
         self.run_metrics["pdf_image_extraction_time"] = timer.elapsed_time
         LoggingUtil().log_info(f"Extracted {len(self.pdf_images)} images from the PDF.")
 
-    def _apply_rule(self, rule: Redactor):
+    def _run_rule(self, rule: Redactor) -> tuple[RedactionResult, float]:
         LoggingUtil().log_info(f"Running redaction rule {rule}")
         with TimerUtil() as timer:
             redaction_result = rule.redact()
-        redaction_time = timer.elapsed_time
+        return redaction_result, timer.elapsed_time
+
+    def _record_rule_result(
+        self, rule: Redactor, redaction_result: RedactionResult, redaction_time: float
+    ):
         redaction_strings = (
             redaction_result.redaction_strings
             if hasattr(redaction_result, "redaction_strings")
@@ -777,10 +783,29 @@ class PDFProcessor(FileProcessor):
         self.run_metrics["text_analysis_total_time"] = 0.0
         self.run_metrics["image_analysis_total_time"] = 0.0
 
-        # Apply each redaction rule
+        # Apply the rules at the same time, since they mostly wait on external services
         self._text_redaction_summary: dict[str, Any] = {}
-        for rule_to_apply in redaction_rules_to_apply:
-            self._apply_rule(rule_to_apply)
+        max_workers = max(
+            1,
+            min(
+                int(os.environ.get("RULE_MAX_WORKERS") or 4),
+                len(redaction_rules_to_apply),
+            ),
+        )
+        with TimerUtil() as timer, ThreadPoolExecutor(max_workers) as executor:
+            futures = [
+                executor.submit(self._run_rule, rule)
+                for rule in redaction_rules_to_apply
+            ]
+            try:
+                # Record in rule order so the results do not depend on which rule finishes first
+                for rule, future in zip(redaction_rules_to_apply, futures, strict=True):
+                    self._record_rule_result(rule, *future.result())
+            except BaseException:
+                for future in futures:
+                    future.cancel()
+                raise
+        self.run_metrics["analysis_wall_time"] = timer.elapsed_time
 
         self.run_metrics["analysis_total_time"] = (
             self.run_metrics["text_analysis_total_time"]
