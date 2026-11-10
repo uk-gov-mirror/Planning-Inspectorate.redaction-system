@@ -180,10 +180,20 @@ class LLMTextAnalyser:
 
     @log_to_appins
     def _set_model_details(self):
-        instance_quota_allocation = 0.5
+        # The share of the deployment's quota that this app instance may use
+        instance_quota_allocation = float(os.environ.get("LLM_QUOTA_ALLOCATION") or 0.5)
         try:
             # Get specified model
             model_details = self.OPENAI_MODELS[self.config.model]
+            # The deployment's limits, which the environment overrides for its capacity
+            max_token_rate_limit = int(
+                os.environ.get("LLM_TOKEN_RATE_LIMIT")
+                or model_details["token_rate_limit"]
+            )
+            max_request_rate_limit = int(
+                os.environ.get("LLM_REQUEST_RATE_LIMIT")
+                or model_details["request_rate_limit"]
+            )
 
             # Set cost per token in GBP
             multiplier = 1e-8
@@ -196,24 +206,24 @@ class LLMTextAnalyser:
 
             # Validate and set token rate limit per minute
             default_token_rate_limit = int(
-                model_details["token_rate_limit"] * instance_quota_allocation
+                max_token_rate_limit * instance_quota_allocation
             )
 
             token_limit = self.config.token_rate_limit
             if token_limit is not None:
                 if token_limit < 1:
                     self.config.token_rate_limit = default_token_rate_limit
-                if token_limit > model_details["token_rate_limit"]:
-                    self.config.token_rate_limit = model_details["token_rate_limit"]
+                if token_limit > max_token_rate_limit:
+                    self.config.token_rate_limit = max_token_rate_limit
                     LoggingUtil().log_info(
                         f"Token rate limit for model {self.config.model} exceeds maximum. "
                         f"Setting to maximum of {self.config.token_rate_limit} tokens per minute."
                     )
-            else:  # default to 50% of max token rate limit
+            else:  # default to the instance's share of the max token rate limit
                 self.config.token_rate_limit = default_token_rate_limit
 
             default_request_rate_limit = int(
-                model_details["request_rate_limit"] * instance_quota_allocation
+                max_request_rate_limit * instance_quota_allocation
             )
 
             # Validate and set request rate limit per minute
@@ -221,13 +231,13 @@ class LLMTextAnalyser:
             if req_limit is not None:
                 if req_limit < 1:
                     self.config.request_rate_limit = default_request_rate_limit
-                if req_limit > model_details["request_rate_limit"]:
-                    self.config.request_rate_limit = model_details["request_rate_limit"]
+                if req_limit > max_request_rate_limit:
+                    self.config.request_rate_limit = max_request_rate_limit
                     LoggingUtil().log_info(
                         f"Request rate limit for model {self.config.model} exceeds maximum. "
                         f"Setting to maximum of {self.config.request_rate_limit} requests per minute."
                     )
-            else:  # default to 50% of max request rate limit
+            else:  # default to the instance's share of the max request rate limit
                 self.config.request_rate_limit = default_request_rate_limit
         except KeyError:
             raise ValueError(f"Model {self.config.model} is not supported.")

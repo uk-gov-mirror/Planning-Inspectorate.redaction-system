@@ -284,6 +284,39 @@ def test__llm_text_analyser___set_model_details__zero_token_request_rate_limit(
 
 
 @patch.object(LLMTextAnalyser, "__init__", return_value=None)
+def test__llm_text_analyser___set_model_details__quota_allocation_from_env(
+    mock_llm_text_analyser_init, monkeypatch
+):
+    monkeypatch.setenv("LLM_QUOTA_ALLOCATION", "0.8")
+    llm_text_analyser = LLMTextAnalyser()
+    llm_text_analyser.config = LLMTextAnalyserConfig(model="gpt-5.6-luna")
+
+    llm_text_analyser._set_model_details()
+
+    assert llm_text_analyser.config.token_rate_limit == TOKEN_RATE_LIMIT * 0.8
+    assert llm_text_analyser.config.request_rate_limit == REQUEST_RATE_LIMIT * 0.8
+
+
+@patch.object(LLMTextAnalyser, "__init__", return_value=None)
+def test__llm_text_analyser___set_model_details__deployment_limits_from_env(
+    mock_llm_text_analyser_init, monkeypatch
+):
+    # A tenth of the default limits, as for a smaller deployment
+    monkeypatch.setenv("LLM_TOKEN_RATE_LIMIT", str(TOKEN_RATE_LIMIT // 10))
+    monkeypatch.setenv("LLM_REQUEST_RATE_LIMIT", str(REQUEST_RATE_LIMIT // 10))
+    llm_text_analyser = LLMTextAnalyser()
+    llm_text_analyser.config = LLMTextAnalyserConfig(
+        model="gpt-5.6-luna", request_rate_limit=REQUEST_RATE_LIMIT
+    )
+
+    llm_text_analyser._set_model_details()
+
+    # The default is the allocated share, and a configured limit is capped at the maximum
+    assert llm_text_analyser.config.token_rate_limit == TOKEN_RATE_LIMIT / 10 * 0.5
+    assert llm_text_analyser.config.request_rate_limit == REQUEST_RATE_LIMIT / 10
+
+
+@patch.object(LLMTextAnalyser, "__init__", return_value=None)
 def test__llm_text_analyser___set_model_details__invalid_model(
     mock_llm_text_analyser_init,
 ):
