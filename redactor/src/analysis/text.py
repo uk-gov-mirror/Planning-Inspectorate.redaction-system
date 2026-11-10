@@ -118,6 +118,10 @@ class LLMTextAnalyser:
     }
     USER_PROMPT_TEMPLATE = PromptTemplate(input_variables=["chunk"], template="{chunk}")
 
+    # Shared so that analysers running at the same time draw on one budget
+    _SHARED_LIMITS: ClassVar[dict[tuple, tuple[Semaphore, TokenSemaphore]]] = {}
+    _SHARED_LIMITS_LOCK: ClassVar[Lock] = Lock()
+
     def __init__(
         self,
         config: LLMTextAnalyserConfig,
@@ -147,11 +151,7 @@ class LLMTextAnalyser:
 
         # Validate and set max concurrent requests
         self._set_workers(self.config.max_concurrent_requests)
-        self.request_semaphore = Semaphore(self.config.max_concurrent_requests)
-
-        self.token_semaphore = TokenSemaphore(
-            self.config.token_rate_limit, self.config.token_timeout
-        )
+        self.request_semaphore, self.token_semaphore = self._get_shared_limits()
 
         self.input_token_count = 0
         self.cached_input_token_count = 0
@@ -160,6 +160,23 @@ class LLMTextAnalyser:
         self.completion_token_count = 0
         self.total_token_count = 0
         self.total_cost = 0.0  # Total cost of LLM calls in GBP
+
+    def _get_shared_limits(self) -> tuple[Semaphore, TokenSemaphore]:
+        """Get the request and token limits shared by analysers with the same settings."""
+        config = self.config
+        key = (
+            config.model,
+            config.max_concurrent_requests,
+            config.token_rate_limit,
+            config.token_timeout,
+        )
+        with self._SHARED_LIMITS_LOCK:
+            if key not in self._SHARED_LIMITS:
+                self._SHARED_LIMITS[key] = (
+                    Semaphore(config.max_concurrent_requests),
+                    TokenSemaphore(config.token_rate_limit, config.token_timeout),
+                )
+            return self._SHARED_LIMITS[key]
 
     @log_to_appins
     def _set_model_details(self):

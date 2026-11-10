@@ -22,6 +22,13 @@ from src.types import (
 MODULE = "src.analysis.text"
 
 
+@pytest.fixture(autouse=True)
+def _clear_shared_limits():
+    LLMTextAnalyser._SHARED_LIMITS.clear()
+    yield
+    LLMTextAnalyser._SHARED_LIMITS.clear()
+
+
 class MockLLMChatCompletion:
     def __init__(self, choices, usage):
         self.choices = choices
@@ -186,6 +193,19 @@ def test__llm_text_analyser____init__():
         client_kwargs["azure_ad_token_provider"] is mock_get_token_provider.return_value
     )
     assert "azure_ad_token" not in client_kwargs
+
+
+def test__llm_text_analyser____init__shares_limits_with_matching_analysers():
+    with patch(f"{MODULE}.get_bearer_token_provider"), patch(f"{MODULE}.AzureOpenAI"):
+        first = LLMTextAnalyser(LLMTextAnalyserConfig(model="gpt-5.6-luna"))
+        second = LLMTextAnalyser(LLMTextAnalyserConfig(model="gpt-5.6-luna"))
+        other = LLMTextAnalyser(
+            LLMTextAnalyserConfig(model="gpt-5.6-luna", token_rate_limit=2000)
+        )
+
+    assert second.request_semaphore is first.request_semaphore
+    assert second.token_semaphore is first.token_semaphore
+    assert other.token_semaphore is not first.token_semaphore
 
 
 @patch.object(LLMTextAnalyser, "__init__", return_value=None)
