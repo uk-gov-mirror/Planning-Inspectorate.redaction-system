@@ -84,9 +84,10 @@ class LLMTextAnalyserConfig(BaseModel):
     """Number of completions to generate per prompt"""
     budget: float | None = None
     """The budget in GBP for LLM usage"""
-    token_timeout: float | None = 60.0
-    """The timeout in seconds for acquiring tokens from the token semaphore"""
-    request_timeout: float | None = 60.0
+    token_timeout: float | None = 600.0
+    """The timeout in seconds for acquiring tokens from the token semaphore. Chunks
+    from every rule queue for the shared limits, so this must outlast that queue"""
+    request_timeout: float | None = 600.0
     """The timeout in seconds for acquiring request semaphore"""
 
     def __init__(self, **data):
