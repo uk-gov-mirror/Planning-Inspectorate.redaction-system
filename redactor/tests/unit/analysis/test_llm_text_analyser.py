@@ -25,8 +25,10 @@ MODULE = "src.analysis.text"
 @pytest.fixture(autouse=True)
 def _clear_shared_limits():
     LLMTextAnalyser._SHARED_LIMITS.clear()
+    LLMTextAnalyser._CLIENT = None
     yield
     LLMTextAnalyser._SHARED_LIMITS.clear()
+    LLMTextAnalyser._CLIENT = None
 
 
 class MockLLMChatCompletion:
@@ -193,6 +195,18 @@ def test__llm_text_analyser____init__():
         client_kwargs["azure_ad_token_provider"] is mock_get_token_provider.return_value
     )
     assert "azure_ad_token" not in client_kwargs
+
+
+def test__llm_text_analyser____init__shares_client_between_analysers():
+    with (
+        patch(f"{MODULE}.get_bearer_token_provider"),
+        patch(f"{MODULE}.AzureOpenAI") as mock_azure_openai,
+    ):
+        first = LLMTextAnalyser(LLMTextAnalyserConfig(model="gpt-5.6-luna"))
+        second = LLMTextAnalyser(LLMTextAnalyserConfig(model="gpt-5.6-luna"))
+
+    mock_azure_openai.assert_called_once()
+    assert second.llm is first.llm
 
 
 def test__llm_text_analyser____init__shares_limits_with_matching_analysers():

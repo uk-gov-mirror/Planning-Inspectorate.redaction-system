@@ -121,6 +121,30 @@ class LLMTextAnalyser:
     # Shared so that analysers running at the same time draw on one budget
     _SHARED_LIMITS: ClassVar[dict[tuple, tuple[Semaphore, TokenSemaphore]]] = {}
     _SHARED_LIMITS_LOCK: ClassVar[Lock] = Lock()
+    _CLIENT: ClassVar[AzureOpenAI | None] = None
+    _CLIENT_LOCK: ClassVar[Lock] = Lock()
+
+    @classmethod
+    def _get_client(cls) -> AzureOpenAI:
+        """Get the Azure OpenAI client, which analysers share to reuse its connections."""
+        with cls._CLIENT_LOCK:
+            if cls._CLIENT is None:
+                azure_endpoint = os.environ.get("OPENAI_ENDPOINT", None)
+                credential = ChainedTokenCredential(
+                    ManagedIdentityCredential(), AzureCliCredential()
+                )
+                token_provider = get_bearer_token_provider(
+                    credential, "https://cognitiveservices.azure.com/.default"
+                )
+                LoggingUtil().log_info(
+                    f"Establishing connection to the LLM at {azure_endpoint}"
+                )
+                cls._CLIENT = AzureOpenAI(
+                    azure_endpoint=azure_endpoint,
+                    api_version="2024-12-01-preview",
+                    azure_ad_token_provider=token_provider,
+                )
+            return cls._CLIENT
 
     def __init__(
         self,
@@ -130,21 +154,7 @@ class LLMTextAnalyser:
         self.config: LLMTextAnalyserConfig = config
 
         # Initialise OpenAI client for Azure
-        self.azure_endpoint = os.environ.get("OPENAI_ENDPOINT", None)
-        credential = ChainedTokenCredential(
-            ManagedIdentityCredential(), AzureCliCredential()
-        )
-        token_provider = get_bearer_token_provider(
-            credential, "https://cognitiveservices.azure.com/.default"
-        )
-        LoggingUtil().log_info(
-            f"Establishing connection to the LLM at {self.azure_endpoint}"
-        )
-        self.llm = AzureOpenAI(
-            azure_endpoint=self.azure_endpoint,
-            api_version="2024-12-01-preview",
-            azure_ad_token_provider=token_provider,
-        )
+        self.llm = self._get_client()
 
         # Validates and sets input_token_cost, completion_token_cost, token_rate_limit and request_rate_limit
         self._set_model_details()
