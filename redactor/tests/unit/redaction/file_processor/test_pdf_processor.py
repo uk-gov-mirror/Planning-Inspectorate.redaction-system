@@ -12,6 +12,7 @@ from PIL import Image
 from src.analysis.images import AzureImageAnalyser
 from src.monitoring import LoggingUtil
 from src.redaction.file_processor import NonEnglishContentException, PDFProcessor
+from src.redaction.redactor import ImageRedactor
 from src.redaction.utils.pdf import (
     PDFImageMetadata,
     PDFLineMetadata,
@@ -721,15 +722,20 @@ class TestApplyRedactionRulesConcurrently:
     def result(name):
         return TextRedactionResult(rule_name=name, run_metrics={}, redaction_strings=())
 
-    def apply_rules(self, redact_functions):
-        """Apply one text rule per function, each of which implements its redact"""
+    def apply_rules(self, redact_functions, image_rules=()):
+        """Apply one rule per function, each of which implements its redact"""
         rules = []
         for i in range(len(redact_functions)):
             rule = Mock(spec=["name", "redactor_type", "text"])
             rule.name = f"rule {i}"
             rule.redactor_type = "llm_text"
             rules.append(rule)
-        redactors = [Mock(redact=redact) for redact in redact_functions]
+        redactors = [
+            Mock(spec=ImageRedactor, redact=redact)
+            if i in image_rules
+            else Mock(redact=redact)
+            for i, redact in enumerate(redact_functions)
+        ]
 
         with patch(
             "src.redaction.file_processor.RedactorFactory.get",
@@ -808,6 +814,21 @@ class TestApplyRedactionRulesConcurrently:
         self.apply_rules([redact, redact, redact])
 
         assert peak == 1
+
+    def test_image_rules_start_first_but_are_recorded_in_rule_order(self, monkeypatch):
+        monkeypatch.setenv("RULE_MAX_WORKERS", "1")
+        started = []
+
+        def redact(name):
+            started.append(name)
+            return self.result(name)
+
+        processor = self.apply_rules(
+            [lambda: redact("text"), lambda: redact("image")], image_rules={1}
+        )
+
+        assert started == ["image", "text"]
+        assert [r.rule_name for r in processor.redaction_results] == ["text", "image"]
 
 
 class TestExtractPDFTextContent(TestExamineApplyRedactionsBase):

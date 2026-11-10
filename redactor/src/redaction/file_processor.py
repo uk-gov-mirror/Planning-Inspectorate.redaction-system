@@ -793,16 +793,24 @@ class PDFProcessor(FileProcessor):
             ),
         )
         with TimerUtil() as timer, ThreadPoolExecutor(max_workers) as executor:
-            futures = [
-                executor.submit(self._run_rule, rule)
-                for rule in redaction_rules_to_apply
-            ]
+            # Image rules wait on rate-limited services and take longest, so start them
+            # first. The sort is stable, so other rules keep their order
+            submit_order = sorted(
+                range(len(redaction_rules_to_apply)),
+                key=lambda i: (
+                    not isinstance(redaction_rules_to_apply[i], ImageRedactor)
+                ),
+            )
+            futures = {
+                i: executor.submit(self._run_rule, redaction_rules_to_apply[i])
+                for i in submit_order
+            }
             try:
                 # Record in rule order so the results do not depend on which rule finishes first
-                for rule, future in zip(redaction_rules_to_apply, futures, strict=True):
-                    self._record_rule_result(rule, *future.result())
+                for i, rule in enumerate(redaction_rules_to_apply):
+                    self._record_rule_result(rule, *futures[i].result())
             except BaseException:
-                for future in futures:
+                for future in futures.values():
                     future.cancel()
                 raise
         self.run_metrics["analysis_wall_time"] = timer.elapsed_time
