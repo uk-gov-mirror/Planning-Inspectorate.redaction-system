@@ -6,6 +6,7 @@ import logging
 import os
 import subprocess
 import time
+from collections import Counter
 from pathlib import Path
 from typing import Any
 
@@ -23,6 +24,7 @@ from .harness import (
     Outcome,
     PerfResult,
     _extract_server_metrics,
+    _failure_category,
     _percentiles,
     _run_id,
     _summarise_durable_status,
@@ -82,6 +84,9 @@ PERF_EXISTS_WAIT_POLL_S = _float_env("PERF_EXISTS_WAIT_POLL_S", 5.0)
 PERF_DOWNLOAD_SAMPLE_EVERY = _int_env("PERF_DOWNLOAD_SAMPLE_EVERY", 1)
 
 PERF_MAX_P95_S = _float_env("PERF_MAX_P95_S", 0.0)
+
+# Share of jobs that must succeed. Jobs that fail on the app side count against it
+PERF_MIN_SUCCESS_RATE = _float_env("PERF_MIN_SUCCESS_RATE", 0.99)
 
 PERF_FIXTURE_PDF = os.getenv("PERF_FIXTURE_PDF", "pas_13.pdf")
 
@@ -462,6 +467,20 @@ async def _run_one(
             downloaded_to=downloaded_to,
         )
 
+    except TimeoutError as e:
+        # A job that outlasts the timeout is a performance failure of the app
+        return PerfResult(
+            outcome=Outcome.APP_FAIL,
+            runtime_status="Timeout",
+            seconds=time.perf_counter() - t0,
+            checked_blob_exists=do_exists_check,
+            out_blob_exists=None,
+            poll_url=poll_url,
+            instance_id=instance_id,
+            durable_status=_summarise_durable_status(durable_status),
+            error=str(e),
+        )
+
     except Exception as e:  # noqa: BLE001
         elapsed = time.perf_counter() - t0
         # Anything unexpected in the harness is test-side
@@ -569,12 +588,12 @@ def test_concurrent_redactions_perf(tmp_path: Path) -> None:
     # ----------------------------
     # Report
     # ----------------------------
-    times = [r.seconds for r in results]
-    stats = _percentiles(times)
-
     successes = [r for r in results if r.outcome == Outcome.SUCCESS]
     app_failures = [r for r in results if r.outcome == Outcome.APP_FAIL]
     test_failures = [r for r in results if r.outcome == Outcome.TEST_FAIL]
+
+    # Failed jobs usually return early, so they would understate the latency
+    stats = _percentiles([r.seconds for r in successes])
 
     # throughput: successes per wall-clock second
     throughput = (len(successes) / wall_elapsed) if wall_elapsed > 0 else 0.0
@@ -599,7 +618,10 @@ def test_concurrent_redactions_perf(tmp_path: Path) -> None:
     print(
         f"wall_seconds={wall_elapsed:.2f} throughput_success_per_sec={throughput:.4f}"
     )
-    print("timings_seconds:", {k: round(v, 3) for k, v in stats.items()})
+    print(
+        "timings_seconds (successful jobs):",
+        {k: round(v, 3) for k, v in stats.items()},
+    )
 
     # The app's own timings, so queueing and polling in the client timings can be told apart
     server_metrics = [_extract_server_metrics(r.durable_status) for r in successes]
@@ -620,14 +642,17 @@ def test_concurrent_redactions_perf(tmp_path: Path) -> None:
             "client_overhead_seconds (queueing, start and polling):",
             {k: round(v, 3) for k, v in _percentiles(overheads).items()},
         )
-    print(f"failed_chunks={sum(m.get('failed_chunks', 0) for m in server_metrics)}")
+    failed_chunks = sum(m.get("failed_chunks", 0) for m in server_metrics)
+    print(f"failed_chunks={failed_chunks}")
     print(
         f"blob_exists_checked={exists_checked} blob_exists_checked_failures={len(exists_failures)}"
     )
     print(f"downloaded_files={len(downloaded)} downloads_dir={downloads_dir}")
 
+    failure_categories = dict(Counter(_failure_category(r) for r in app_failures))
     if app_failures:
-        print("\nApp failures (acceptable) (up to 5):")
+        print(f"\nApp failures by category: {failure_categories}")
+        print("App failures (up to 5):")
         for r in app_failures[:5]:
             print(
                 f"- runtime={r.runtime_status} seconds={r.seconds:.2f} "
@@ -657,7 +682,19 @@ def test_concurrent_redactions_perf(tmp_path: Path) -> None:
         f"{len(test_failures)} test-side failures (see summary above)"
     )
 
-    if PERF_MAX_P95_S and PERF_MAX_P95_S > 0:
+    success_rate = len(successes) / len(results) if results else 0.0
+    assert success_rate >= PERF_MIN_SUCCESS_RATE, (
+        f"success rate {success_rate:.1%} is below "
+        f"PERF_MIN_SUCCESS_RATE={PERF_MIN_SUCCESS_RATE:.1%}; "
+        f"app failures by category: {failure_categories}"
+    )
+    assert failed_chunks == 0, (
+        f"{failed_chunks} LLM chunks failed, so redactions may be missing"
+    )
+
+    if PERF_MAX_P95_S > 0:
         assert stats["p95"] <= PERF_MAX_P95_S, (
             f"p95 {stats['p95']:.2f}s exceeds PERF_MAX_P95_S={PERF_MAX_P95_S:.2f}s"
         )
+    else:
+        print("WARNING: PERF_MAX_P95_S is not set, so latency is not enforced")
