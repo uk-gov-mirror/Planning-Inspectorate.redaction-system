@@ -28,6 +28,11 @@ from .harness import (
     _percentiles,
     _run_id,
     _summarise_durable_status,
+    has_highlights,
+    load_expected_strings,
+    proposed_redaction_terms,
+    redaction_recall,
+    select_fixtures,
 )
 
 logging.getLogger("httpx").setLevel(logging.WARNING)
@@ -89,6 +94,16 @@ PERF_MAX_P95_S = _float_env("PERF_MAX_P95_S", 0.0)
 PERF_MIN_SUCCESS_RATE = _float_env("PERF_MIN_SUCCESS_RATE", 0.99)
 
 PERF_FIXTURE_PDF = os.getenv("PERF_FIXTURE_PDF", "pas_13.pdf")
+
+# A folder of PDFs, relative to tests/resources/pdf, that the jobs take turns to use
+# instead of PERF_FIXTURE_PDF. Distinct documents give a realistic mix and avoid
+# the caches that repeating one document would hit
+PERF_FIXTURE_DIR = os.getenv("PERF_FIXTURE_DIR", "")
+PERF_SEED = _int_env("PERF_SEED", 0)
+
+# The share of a fixture's labelled strings that the proposed redactions must cover, on
+# average. Needs the output to be downloaded, so set PERF_EXISTS_SAMPLE_EVERY=1
+PERF_MIN_RECALL = _float_env("PERF_MIN_RECALL", 0.0)
 
 
 # ----------------------------
@@ -512,8 +527,20 @@ def test_concurrent_redactions_perf(tmp_path: Path) -> None:
     start_url = function_start_url()
 
     repo_root = _repo_root()
-    fixture_path = repo_root / "redactor/tests/resources/pdf" / PERF_FIXTURE_PDF
-    assert fixture_path.exists(), f"Missing fixture PDF: {fixture_path}"
+    pdf_dir = repo_root / "redactor/tests/resources/pdf"
+    if PERF_FIXTURE_DIR:
+        fixture_paths = sorted((pdf_dir / PERF_FIXTURE_DIR).glob("*.pdf"))
+    else:
+        fixture_paths = [pdf_dir / PERF_FIXTURE_PDF]
+    assert fixture_paths, f"No fixture PDFs found for {PERF_FIXTURE_DIR or pdf_dir}"
+    for fixture_path in fixture_paths:
+        assert fixture_path.exists(), f"Missing fixture PDF: {fixture_path}"
+    highlighted = [p.name for p in fixture_paths if has_highlights(p)]
+    assert not highlighted, (
+        f"{highlighted} have highlights, which the redactor would read as its own "
+        "proposed redactions. Use PDFs without highlights"
+    )
+    fixtures = select_fixtures(fixture_paths, PERF_TOTAL, PERF_SEED)
 
     # where we will download sampled outputs (proof they can be written to disk)
     downloads_dir = tmp_path / "downloaded_redactions"
@@ -528,7 +555,7 @@ def test_concurrent_redactions_perf(tmp_path: Path) -> None:
         in_blob = f"perf/{run_id}/in/{idx}.pdf"
         out_blob = f"perf/{run_id}/out/{idx}_REDACTED.pdf"
 
-        az_upload(storage_account, container_name, in_blob, fixture_path)
+        az_upload(storage_account, container_name, in_blob, fixtures[i])
 
         payload = build_payload(
             storage_account=storage_account,
@@ -544,6 +571,8 @@ def test_concurrent_redactions_perf(tmp_path: Path) -> None:
                 "out_blob": out_blob,
                 "i": i,
                 "idx": idx,
+                "fixture": fixtures[i].name,
+                "expected": load_expected_strings(fixtures[i]),
                 "out_prefix": f"perf/{run_id}/out/",
             }
         )
@@ -606,7 +635,7 @@ def test_concurrent_redactions_perf(tmp_path: Path) -> None:
     downloaded = [r for r in results if r.downloaded_to]
 
     print("\n=== PERF SUMMARY ===")
-    print(f"fixture={PERF_FIXTURE_PDF}")
+    print(f"fixtures={sorted({j['fixture'] for j in jobs})} seed={PERF_SEED}")
     print(f"concurrency={PERF_CONCURRENCY} total={PERF_TOTAL} poll_s={PERF_POLL_S}")
     print(f"timeout_s={PERF_TIMEOUT_S} exists_sample_every={PERF_EXISTS_SAMPLE_EVERY}")
     print(
@@ -622,6 +651,36 @@ def test_concurrent_redactions_perf(tmp_path: Path) -> None:
         "timings_seconds (successful jobs):",
         {k: round(v, 3) for k, v in stats.items()},
     )
+
+    latency_by_fixture: dict[str, list[float]] = {}
+    for job, result in zip(jobs, results, strict=True):
+        if result.outcome == Outcome.SUCCESS:
+            latency_by_fixture.setdefault(job["fixture"], []).append(result.seconds)
+    if len(latency_by_fixture) > 1:
+        print(
+            "p50_seconds_by_fixture:",
+            {
+                name: round(_percentiles(values)["p50"], 1)
+                for name, values in sorted(latency_by_fixture.items())
+            },
+        )
+
+    # How much of what the fixtures label as sensitive the redactor proposed
+    recalls = [
+        redaction_recall(
+            job["expected"], proposed_redaction_terms(Path(result.downloaded_to))
+        )
+        for job, result in zip(jobs, results, strict=True)
+        if result.outcome == Outcome.SUCCESS
+        and result.downloaded_to
+        and job["expected"]
+    ]
+    mean_recall = sum(recalls) / len(recalls) if recalls else None
+    if recalls:
+        print(
+            f"recall_of_labelled_strings: mean={mean_recall:.3f} "
+            f"min={min(recalls):.3f} jobs_checked={len(recalls)}"
+        )
 
     # The app's own timings, so queueing and polling in the client timings can be told apart
     server_metrics = [_extract_server_metrics(r.durable_status) for r in successes]
@@ -691,6 +750,14 @@ def test_concurrent_redactions_perf(tmp_path: Path) -> None:
     assert failed_chunks == 0, (
         f"{failed_chunks} LLM chunks failed, so redactions may be missing"
     )
+    if PERF_MIN_RECALL > 0:
+        assert mean_recall is not None, (
+            "PERF_MIN_RECALL is set, but no output with labelled strings was "
+            "downloaded to check. Use labelled fixtures and PERF_EXISTS_SAMPLE_EVERY=1"
+        )
+        assert mean_recall >= PERF_MIN_RECALL, (
+            f"mean recall {mean_recall:.3f} is below PERF_MIN_RECALL={PERF_MIN_RECALL}"
+        )
 
     if PERF_MAX_P95_S > 0:
         assert stats["p95"] <= PERF_MAX_P95_S, (
