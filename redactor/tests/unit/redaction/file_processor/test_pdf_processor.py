@@ -770,6 +770,7 @@ class TestApplyRedactionRules(TestExamineApplyRedactionsBase):
 
         assert image_text_rule.images == []
         assert list(image_rule.images) == [page_image]
+
     def test_records_page_offsets_per_rule(self):
         """
         - Given a text rule and an image text rule
@@ -982,6 +983,7 @@ class TestExtractPDFTextAndImages(TestExamineApplyRedactionsBase):
         info_messages = [c.args[0] for c in LoggingUtil.log_info.call_args_list]
         assert any(text_on_page in message for message in audit_messages)
         assert not any(text_on_page in message for message in info_messages)
+
     def test_sets_page_offsets(self):
         """
         - Given a two page PDF with embedded text
