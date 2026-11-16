@@ -601,7 +601,7 @@ class PDFUtil:
             None if the page's characters can't be matched to the word
         """
         characters = []
-        for block in page.get_text("rawdict", clip=word_rect)["blocks"]:
+        for block in page.get_text("dict", clip=word_rect)["blocks"]:
             for line in block.get("lines", []):
                 for text_span in line["spans"]:
                     for character in text_span["chars"]:
