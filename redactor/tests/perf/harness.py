@@ -3,14 +3,12 @@
 import os
 import statistics
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 from enum import Enum
 
 
 def _run_id() -> str:
-    return os.getenv("E2E_RUN_ID") or datetime.now(tz=datetime.timezone.utc).strftime(
-        "%Y%m%d-%H%M%S"
-    )
+    return os.getenv("E2E_RUN_ID") or datetime.now(tz=UTC).strftime("%Y%m%d-%H%M%S")
 
 
 # ----------------------------
