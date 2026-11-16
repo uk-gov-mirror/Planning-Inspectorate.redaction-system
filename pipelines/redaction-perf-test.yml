@@ -72,7 +72,7 @@ extends:
           - script: |
               set -e
               cd redaction-system
-              python3 -m pip install .
+              python3 -m pip install --group dev .
             displayName: Install redactor package
 
           - script: |
