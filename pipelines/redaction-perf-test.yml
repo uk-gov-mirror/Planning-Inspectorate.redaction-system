@@ -19,6 +19,14 @@ parameters:
 - name: perfFixturePdf
   type: string
   default: PINS_first_10_pages.pdf
+- name: perfFixtureDir
+  type: string
+  default: perf
+  displayName: Folder of fixtures under redactor/tests/resources/pdf (empty to use perfFixturePdf)
+- name: perfMinRecall
+  type: number
+  default: 0
+  displayName: Minimum mean share of labelled strings redacted (0 to only report it)
 
 pr: none
 trigger: none
@@ -96,13 +104,15 @@ extends:
               export PERF_TIMEOUT_S="${{ parameters.perfTimeoutSeconds }}"
               export PERF_POLL_S="${{ parameters.perfPollSeconds }}"
               export PERF_FIXTURE_PDF="${{ parameters.perfFixturePdf }}"
+              export PERF_FIXTURE_DIR="${{ parameters.perfFixtureDir }}"
+              export PERF_MIN_RECALL="${{ parameters.perfMinRecall }}"
 
               echo "env=${{ parameters.env }}"
               echo "E2E_FUNCTION_BASE_URL=${E2E_FUNCTION_BASE_URL}"
               echo "E2E_STORAGE_ACCOUNT=${E2E_STORAGE_ACCOUNT}"
               echo "E2E_CONTAINER_NAME=${E2E_CONTAINER_NAME}"
               echo "PERF_CONCURRENCY=${PERF_CONCURRENCY} PERF_TOTAL=${PERF_TOTAL}"
-              echo "fixture=$PERF_FIXTURE_PDF"
+              echo "fixture=$PERF_FIXTURE_PDF dir=$PERF_FIXTURE_DIR"
 
 
               # Run tests (capture exit code so we can list blobs even on failure)
