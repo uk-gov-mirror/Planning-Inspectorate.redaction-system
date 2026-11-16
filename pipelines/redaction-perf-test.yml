@@ -108,7 +108,7 @@ extends:
               # Run tests (capture exit code so we can list blobs even on failure)
               set +e
               python3 -m pytest -q -s \
-                tests/perf_test/test_perf_concurrent_redactions.py::test_concurrent_redactions_perf \
+                tests/perf/test_perf_concurrent_redactions.py::test_concurrent_redactions_perf \
                 --junitxml=junit/perf_test_results.xml
               PYTEST_EXIT=$?
               set -e

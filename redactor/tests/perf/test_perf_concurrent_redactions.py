@@ -1,4 +1,4 @@
-# redactor/tests/perf_test/test_perf_concurrent_redactions.py
+# redactor/tests/perf/test_perf_concurrent_redactions.py
 
 import asyncio
 import json
@@ -93,7 +93,7 @@ PERF_FIXTURE_PDF = os.getenv("PERF_FIXTURE_PDF", "pas_13.pdf")
 def _repo_root() -> Path:
     """
     This file is typically:
-      <repo>/redactor/tests/perf_test/test_perf_concurrent_redactions.py
+      <repo>/redactor/tests/perf/test_perf_concurrent_redactions.py
 
     parents[3] -> <repo>
     """

@@ -60,6 +60,6 @@ perf: wait-processor-func
 	cd redactor && \
 		export PYTHONPATH=$$(pwd) && \
 		PERF_TOTAL=$(PERF_TOTAL) PERF_CONCURRENCY=$(PERF_CONCURRENCY) PERF_TIMEOUT_S=$(PERF_TIMEOUT_S) \
-		python3 -m pytest -q -s tests/perf_test/test_perf_concurrent_redactions.py
+		python3 -m pytest -q -s tests/perf/test_perf_concurrent_redactions.py
 
 
