@@ -1,11 +1,16 @@
 """Perf test helpers that need neither Azure nor the e2e utilities."""
 
+import json
 import os
+import random
 import re
 import statistics
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import Enum
+from pathlib import Path
+
+import pymupdf
 
 
 def _run_id() -> str:
@@ -132,3 +137,54 @@ def _failure_category(result: PerfResult) -> str:
     if result.checked_blob_exists and result.out_blob_exists is not True:
         return "output_blob_missing"
     return "other"
+
+
+def select_fixtures(paths: list[Path], total: int, seed: int = 0) -> list[Path]:
+    """`total` fixtures in a seeded random order, each used about equally often"""
+    rng = random.Random(seed)
+    selected: list[Path] = []
+    while len(selected) < total:
+        batch = sorted(paths)
+        rng.shuffle(batch)
+        selected.extend(batch)
+    return selected[:total]
+
+
+def has_highlights(pdf_path: Path) -> bool:
+    """Whether the PDF already has highlights, which the redactor would read as its own"""
+    with pymupdf.open(pdf_path) as pdf:
+        return any(page.first_annot for page in pdf)
+
+
+def load_expected_strings(fixture: Path) -> list[str]:
+    """The strings that a fixture's labels say must be redacted, or none if unlabelled"""
+    sidecar = fixture.with_suffix(".expected.json")
+    if not sidecar.exists():
+        return []
+    return json.loads(sidecar.read_text(encoding="utf-8")).get("redact", [])
+
+
+def proposed_redaction_terms(pdf_path: Path) -> list[str]:
+    """The strings that the redactor proposed, which it keeps in the content of its highlights"""
+    with pymupdf.open(pdf_path) as pdf:
+        return [
+            annotation.info.get("content") or ""
+            for page in pdf
+            for annotation in page.annots(pymupdf.PDF_ANNOT_HIGHLIGHT) or []
+        ]
+
+
+def redaction_recall(expected: list[str], proposed: list[str]) -> float | None:
+    """The share of the expected strings that a proposed redaction covers in full"""
+    if not expected:
+        return None
+
+    def normalise(text: str) -> str:
+        return " ".join(text.split()).casefold()
+
+    proposed_normalised = [normalise(term) for term in proposed]
+    covered = sum(
+        any(normalise(string) in term for term in proposed_normalised)
+        for string in expected
+    )
+    return covered / len(expected)

@@ -1,6 +1,9 @@
 import math
 import re
+from collections import Counter
+from pathlib import Path
 
+import pymupdf
 import pytest
 
 from tests.perf.harness import (
@@ -10,6 +13,11 @@ from tests.perf.harness import (
     _failure_category,
     _percentiles,
     _run_id,
+    has_highlights,
+    load_expected_strings,
+    proposed_redaction_terms,
+    redaction_recall,
+    select_fixtures,
 )
 
 
@@ -102,3 +110,61 @@ def test_percentiles_of_no_values_are_not_a_number():
     stats = _percentiles([])
 
     assert all(math.isnan(value) for value in stats.values())
+
+
+def _pdf_with_highlight(path, content=None):
+    pdf = pymupdf.open()
+    page = pdf.new_page()
+    page.insert_text((72, 72), "Joan Brown")
+    if content is not None:
+        annotation = page.add_highlight_annot(pymupdf.Rect(72, 60, 130, 76))
+        annotation.set_info({"content": content})
+        annotation.update()
+    pdf.save(path)
+    pdf.close()
+    return path
+
+
+def test_select_fixtures_uses_each_fixture_about_equally_in_a_seeded_order():
+    paths = [Path("a.pdf"), Path("b.pdf"), Path("c.pdf")]
+
+    selected = select_fixtures(paths, total=7, seed=1)
+
+    assert selected == select_fixtures(paths, total=7, seed=1)
+    counts = Counter(selected)
+    assert sorted(counts.values()) == [2, 2, 3]
+
+
+def test_has_highlights(tmp_path):
+    assert not has_highlights(_pdf_with_highlight(tmp_path / "plain.pdf"))
+    assert has_highlights(_pdf_with_highlight(tmp_path / "marked.pdf", "Joan Brown"))
+
+
+def test_proposed_redaction_terms_are_the_content_of_the_highlights(tmp_path):
+    pdf_path = _pdf_with_highlight(tmp_path / "marked.pdf", "Joan Brown")
+
+    assert proposed_redaction_terms(pdf_path) == ["Joan Brown"]
+
+
+def test_load_expected_strings(tmp_path):
+    fixture = tmp_path / "doc.pdf"
+    assert load_expected_strings(fixture) == []
+
+    (tmp_path / "doc.expected.json").write_text('{"redact": ["Joan Brown"]}')
+
+    assert load_expected_strings(fixture) == ["Joan Brown"]
+
+
+@pytest.mark.parametrize(
+    ("expected", "proposed", "recall"),
+    [
+        (["Joan Brown", "4 High Street"], ["Joan Brown", "4 High Street"], 1.0),
+        (["Joan Brown"], ["  joan   BROWN "], 1.0),
+        (["Joan Brown"], ["Mrs Joan Brown"], 1.0),
+        (["Mr John Smith"], ["John Smith"], 0.0),
+        (["Joan Brown", "4 High Street"], ["Joan Brown"], 0.5),
+        ([], ["Joan Brown"], None),
+    ],
+)
+def test_redaction_recall(expected, proposed, recall):
+    assert redaction_recall(expected, proposed) == recall
