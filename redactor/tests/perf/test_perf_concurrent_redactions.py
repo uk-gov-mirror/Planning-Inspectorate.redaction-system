@@ -22,6 +22,7 @@ from ..e2e.utils import (
 from .harness import (
     Outcome,
     PerfResult,
+    _extract_server_metrics,
     _percentiles,
     _run_id,
     _summarise_durable_status,
@@ -599,6 +600,27 @@ def test_concurrent_redactions_perf(tmp_path: Path) -> None:
         f"wall_seconds={wall_elapsed:.2f} throughput_success_per_sec={throughput:.4f}"
     )
     print("timings_seconds:", {k: round(v, 3) for k, v in stats.items()})
+
+    # The app's own timings, so queueing and polling in the client timings can be told apart
+    server_metrics = [_extract_server_metrics(r.durable_status) for r in successes]
+    for name in ("server_seconds", "analysis_seconds"):
+        values = [m[name] for m in server_metrics if m.get(name) is not None]
+        if values:
+            print(
+                f"{name}:",
+                {k: round(v, 3) for k, v in _percentiles(values).items()},
+            )
+    overheads = [
+        r.seconds - m["server_seconds"]
+        for r, m in zip(successes, server_metrics, strict=True)
+        if m.get("server_seconds") is not None
+    ]
+    if overheads:
+        print(
+            "client_overhead_seconds (queueing, start and polling):",
+            {k: round(v, 3) for k, v in _percentiles(overheads).items()},
+        )
+    print(f"failed_chunks={sum(m.get('failed_chunks', 0) for m in server_metrics)}")
     print(
         f"blob_exists_checked={exists_checked} blob_exists_checked_failures={len(exists_failures)}"
     )

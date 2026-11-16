@@ -83,3 +83,27 @@ def _summarise_durable_status(status: dict | None) -> dict:
         "errorMessage",
     ]
     return {k: status.get(k) for k in keys if k in status}
+
+
+def _extract_server_metrics(durable_status: dict | None) -> dict[str, float | int]:
+    """
+    Timings and the failed chunk count that the app reported in the orchestration
+    output, without the redacted content that the run metrics also hold.
+    """
+    output = (durable_status or {}).get("output")
+    if not isinstance(output, dict):
+        return {}
+    run_metrics = output.get("run_metrics") or {}
+    failed_chunks = sum(
+        (rule.get("llm_metadata") or {}).get("failed_chunk_count", 0)
+        for rule in (run_metrics.get("result_metrics") or {}).values()
+        if isinstance(rule, dict)
+    )
+    return {
+        "server_seconds": output.get("execution_time_seconds"),
+        # Falls back to the serial total, which is the wall time when rules ran in turn
+        "analysis_seconds": run_metrics.get(
+            "analysis_wall_time", run_metrics.get("analysis_total_time")
+        ),
+        "failed_chunks": failed_chunks,
+    }
